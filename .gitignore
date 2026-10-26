@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env
+storage/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
