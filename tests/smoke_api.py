@@ -58,7 +58,7 @@ def main():
             print('Repeat:', ingest(client, first, now=now), flush=True)
             assert rows(first) == expected, 'Incremental rerun changed results'
 
-            # Force all historical windows, independently of the weekly timer.
+            # Explicitly refresh all historical windows instead of the overlap.
             print('Reconcile:', ingest(client, first, reconcile=True, now=now), flush=True)
             assert rows(first) == expected, 'Reconciliation changed results'
 

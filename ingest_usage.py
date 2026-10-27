@@ -34,7 +34,6 @@ SOURCE_START = date(2026, 1, 1)
 MAX_WINDOW_DAYS = 31
 PAGE_SIZE = 200
 LOOKBACK_DAYS = 30
-RECONCILE_INTERVAL = timedelta(days=7)
 MAX_HTTP_ATTEMPTS = 6
 HTTP_TIMEOUT = (5, 30)  # Connect timeout, then read timeout, in seconds.
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -347,11 +346,11 @@ def prepare_database(connection, lock_timeout):
         WHERE length(updated_at) = 32 AND substr(updated_at, 20) = '.000000+00:00'""")
 
 
-def choose_scan(connection, now, reconcile):
+def choose_scan(connection, reconcile):
     """Return (inclusive_start_date, is_full_scan) from committed source state.
 
-    Full scans are required on first use, on explicit request, or after seven
-    days. Incremental scans overlap the latest *received* usage date by 30 days;
+    Full scans are required on first use or on explicit request, not on a timer.
+    Incremental scans overlap the latest *received* usage date by 30 days;
     empty future API responses must never advance that date. This matters when
     the API's simulated present is earlier than the computer's current date.
     Call this only after taking the writer lock so another run cannot change the
@@ -363,10 +362,6 @@ def choose_scan(connection, now, reconcile):
     latest_usage_date = connection.execute('SELECT MAX(usage_date) FROM usage').fetchone()[0]
 
     if reconcile or latest_usage_date is None or last_full_row is None:
-        return SOURCE_START, True
-
-    last_full_scan = datetime.fromisoformat(last_full_row[0])
-    if now - last_full_scan >= RECONCILE_INTERVAL:
         return SOURCE_START, True
 
     overlap_start = date.fromisoformat(latest_usage_date) - timedelta(days=LOOKBACK_DAYS)
@@ -411,7 +406,7 @@ def ingest(client, database, reconcile=False, now=None, lock_timeout=60):
     Args:
         client: BillingClient, or a test double with pages() and a counts mapping.
         database: SQLite file path on persistent local storage.
-        reconcile: Force all history to be scanned regardless of the schedule.
+        reconcile: Force all history to be scanned instead of the normal overlap.
         now: A timezone-aware datetime for deterministic tests; defaults to UTC now.
         lock_timeout: Seconds to wait per database locking operation.
 
@@ -436,7 +431,7 @@ def ingest(client, database, reconcile=False, now=None, lock_timeout=60):
     http_before = dict(client.counts)
     try:
         prepare_database(connection, lock_timeout)
-        start, full = choose_scan(connection, now, reconcile)
+        start, full = choose_scan(connection, reconcile)
         for first, last in windows(start, end):
             for page in client.pages(first, last):
                 for record in page:
@@ -483,7 +478,7 @@ def main():
     parser.add_argument('--api-url', default=os.getenv('BILLING_API_URL', 'http://127.0.0.1:8765'))
     parser.add_argument('--database', default=os.getenv('USAGE_DATABASE', 'storage/usage.sqlite3'))
     parser.add_argument('--reconcile', action='store_true',
-                        help='Scan all history instead of using the normal refresh schedule')
+                        help='Scan all history instead of using the normal 30-day overlap')
     args = parser.parse_args()
     client = None
     try:

@@ -224,16 +224,22 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.rows('ingestion_state'), state)
 
     def test_reconciliation_and_fresh_load_agree(self):
-        """Find old late arrivals on day seven and on demand, matching a clean reload."""
+        """Elapsed time never forces a full scan; manual reconciliation repairs history."""
         self.run_source([record()])
         records = [record(), record('old-late', '2026-02-01')]
-        self.run_source(records, now=NOW + timedelta(days=6))
-        self.assertEqual(len(self.rows()), 1)
-        _, summary = self.run_source(records, now=NOW + timedelta(days=7))
+        before, state = self.rows(), self.rows('ingestion_state')
+        for days in (6, 7, 90):
+            source, summary = self.run_source(records, now=NOW + timedelta(days=days))
+            self.assertEqual(summary['mode'], 'incremental')
+            self.assertEqual(source.ranges[0][0], date(2026, 8, 20))
+            self.assertEqual(self.rows(), before)
+            self.assertEqual(self.rows('ingestion_state'), state)
+        _, summary = self.run_source(records, reconcile=True, now=NOW + timedelta(days=90))
         self.assertEqual(summary['mode'], 'full')
+        self.assertEqual(len(self.rows()), 2)
         expected = self.rows()
         fresh = str(Path(self.directory.name) / 'fresh.db')
-        ingest(Source(records), fresh, now=NOW + timedelta(days=7))
+        ingest(Source(records), fresh, now=NOW + timedelta(days=90))
         with closing(sqlite3.connect(fresh)) as db:
             self.assertEqual(db.execute('SELECT * FROM usage ORDER BY 1').fetchall(), expected)
         records.append(record('forced', '2026-03-01'))

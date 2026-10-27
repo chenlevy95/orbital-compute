@@ -8,13 +8,38 @@ start 30 days before the maximum stored usage date. Anchoring the overlap to
 received data, rather than the machine clock, handles the mock API's earlier
 simulated date. Empty responses never advance the received-data watermark.
 
-The first run at least seven days after the last successful full scan reconciles
-all history; `--reconcile` forces this immediately. The vendor bounds restatements
-but not first-arrival lateness, so a bounded overlap alone cannot guarantee
-completeness. Weekly reconciliation reduces routine requests at the cost of
-waiting until reconciliation for old late arrivals. Full scans every run discover
-these sooner but become increasingly expensive. Failed or missed runs extend the
-reconciliation delay. A lookback-only solution would require a vendor lateness guarantee.
+We assume first arrivals are no more than **30 days after the usage date**.
+This is our implementation assumption, not a vendor guarantee: the assignment
+bounds restatements to 30 days but gives no maximum first-arrival delay. To start
+simple and avoid unnecessary API requests and compute, there is **no automatic
+weekly reconciliation**. After backfill, normal runs use the 30-day overlap;
+`--reconcile` remains available for a manual full-history refresh. The stored
+`last_full_scan` marks a committed full scan; its age does not trigger work.
+
+Black-box measurements at simulated API date **2026-10-26** covered all **5,616**
+visible record IDs, with usage dates **2026-01-01 through 2026-09-27**:
+
+| First-arrival delay | Records | Percentage |
+| --- | ---: | ---: |
+| 0–1 days | 5,613 | 99.95% |
+| 2–7 days | 0 | 0% |
+| 8–30 days | 3 | 0.05% |
+| 31–60 days | 0 | 0% |
+| More than 60 days | 0 | 0% |
+
+We queried isolated, unchanged API instances at usage date +1, +7, +30, and +60
+days (capped at the observation date), stopping once each ID appeared. This
+measures visibility through the documented HTTP interface, not
+`updated_at - usage_date`, which would mix first arrivals with restatements.
+The three late records were C008's September 18 H100, H200, and SSD usage:
+absent September 25, present September 26, **eight days late**, with current
+amounts totaling **$10,775.44**. No source implementation or backing data was read.
+
+The 30-day overlap covers every measured arrival, so this dataset provides no
+evidence that weekly full scans are currently needed. It does not prove a future
+lateness bound or include records not yet visible at the observation cutoff.
+If the assumption is violated, records outside the overlap can remain missing
+until a manual `--reconcile`; incremental and fresh loads may then differ.
 
 ## Storage, consistency, and reliability
 
@@ -49,7 +74,8 @@ and bounded retries handle transient failures. Backoff includes jitter and honor
 `Retry-After`; an excessive delay fails the run instead of retrying prematurely.
 Requests are sequential to limit rate pressure. The API offers no documented
 snapshot-consistent pagination, so a changing source cannot be read as a guaranteed
-single point-in-time snapshot; overlap and reconciliation repair eventual differences.
+single point-in-time snapshot; overlap revisits recent differences, and manual
+reconciliation can repair older omissions.
 
 ## Validation and deliberate omissions
 
@@ -76,9 +102,10 @@ are also deliberately omitted to keep this stage small and understandable.
 
 For production, use persistent managed storage, a secret store, and Airflow or an
 equivalent scheduler with daily runs, delayed retries, and explicit backfill and
-reconciliation jobs. Alert on failed or missing runs, stale data, and reconciliation
-age; validate changes in CI before deployment. On spot nodes, durable staging and
-atomic publication would avoid refetching entire interrupted runs. Finance workbook
+reprocessing jobs. Measure first-arrival delays and revisit the overlap or add
+scheduled reconciliation if evidence warrants it. Alert on failed or missing runs
+and stale data; validate changes in CI before deployment. On spot nodes, durable
+staging and atomic publication would avoid refetching entire interrupted runs. Finance workbook
 layout detection remains part of the future contract-ingestion work, not this loader.
 
 AI assistance was used to implement the loader, tests, and documentation. Verification

@@ -97,8 +97,10 @@ The output database contains `usage` (including void records) and `non_void_usag
 
 For daily runs, configure cron or Windows Task Scheduler with an absolute Python
 and database path and the credential environment variables. Capture stdout/stderr
-and retry nonzero exits after a delay. Weekly reconciliation is automatic; use
-`--reconcile` to refresh all history immediately.
+and retry nonzero exits after a delay. There is no automatic periodic full scan;
+normal runs use the 30-day overlap, assuming first arrivals are no more than
+30 days late (see NOTES.md for measured evidence and limits). Use `--reconcile`
+to refresh all history manually when needed.
 
 - Connection failures: check that the mock is running and the API URL is correct.
 - `401`/`403`: check credentials in the environment of the running job.
