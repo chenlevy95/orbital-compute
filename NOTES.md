@@ -112,37 +112,58 @@ and add fixture coverage before deploying parser changes.
 
 ## Contract snapshots and history
 
-`ingest_commitments.py` uses openpyxl and the same local SQLite database, with
-its own transaction and tables. Original workbook bytes plus checksums preserve
-source evidence; normalized observations preserve all extra columns and duplicate
-row references. SCD Type 2 history versions customer identity/name, inclusive
-term dates, amount, and status. Extra-column changes stay in observations.
-Observation dates come from filenames; they are not legal amendment dates.
-Disappearance never deletes a contract or closes its last known version.
+`ingest_commitments.py` uses openpyxl and the same local SQLite database. Raw
+archival commits before validation: `commitment_files` retains each received
+filename/checksum, original bytes, processing state, and diagnostics, even when
+the file is incomplete. Validated `commitment_snapshots` reference that evidence;
+observations preserve extra columns and duplicate row references. SCD Type 2
+history versions contract terms and supplied descriptive changes. Observation
+dates come from filenames, not legal amendment dates. Disappearance never deletes
+a contract or closes its last known version.
 
-Header discovery uses the full required field set and explicit aliases, handling
-the supplied sheet/column changes without fuzzy guesses. Bad or ambiguous layouts,
-malformed core values, conflicting duplicates, and overlapping customer terms
-block the entire batch. Exact duplicates are collapsed with warnings. Currency
-strings and dates are normalized explicitly, independent of OS locale; core-field
-formulas are rejected rather than trusting potentially stale cached values.
+Header discovery uses essential fields and explicit aliases, handling supplied
+sheet/column changes without fuzzy guesses. IDs, dates, and amount are essential;
+missing values quarantine the whole snapshot. Customer name and status are
+descriptive: absent columns are recorded in `missing_fields_json`, and history
+retains their last known values (or NULL on first observation). Present empty
+cells explicitly set NULL. This preserves the distinction between unavailable
+metadata and an actual supplied change. Essential terms are never filled from
+previous exports, which could invent an unconfirmed combination of amount/dates.
 
-Parsing precedes locking. Under the write lock, matching snapshot checksums are
-no-ops; a changed file claiming an existing date fails. New observations trigger
-a deterministic history rebuild from the retained archive. This supports older
-arrivals without complicated retroactive interval surgery. It uses more CPU than
-incremental history maintenance, but is appropriate for these small trackers.
-Source archival costs storage; observations alone would save a derived table but
-make downstream version queries harder. SQLite avoids another service, while
-PostgreSQL would suit distributed workers. Both ingestion commands commit
-independently; combined model publication is deferred along with the models.
+Bad layouts, malformed tracked values, conflicting duplicates, formulas in
+tracked fields, and overlapping terms quarantine a snapshot without publishing
+partial rows. Valid files can proceed independently. Exact duplicates produce
+warnings; money and dates use explicit, locale-independent normalization. Fuzzy
+matching is deliberately excluded from automatic acceptance: similar words do
+not prove identical financial meaning. Suggested aliases could improve future
+diagnostics, but would still need human review before publication.
 
-Verification covers all three exports, exact persisted-state equality on replay,
-fresh versus incremental and reverse-order loads, disappeared/reappearing
-contracts, transaction rollback, killed writers, and concurrent fresh loads.
-The real load yields 3 snapshots, 29 observations, 16 versions, and 11 contracts;
-an immediate rerun adds nothing. A reviewed historical-correction workflow and
-automated export-delivery monitoring remain future work.
+Archival identity is filename plus checksum; publication identity remains snapshot
+date. A corrected quarantined file may publish for an unpublished date, retaining
+earlier rejected bytes as superseded evidence. A different file for an already
+published date is quarantined rather than rewriting history. Matching accepted or
+rejected replays do not change persisted state. Pending archives resume after a
+crash; `--reprocess` explicitly retries quarantines from stored bytes after a parser
+fix, even when the original file is gone. Nonzero exits and structured findings
+make unresolved quarantine visible; current terms remain usable but can be stale.
+
+Each publication candidate rebuilds history in date order and validates every
+published state, including later dates affected by an older arrival. A failed
+candidate rolls back without affecting accepted history or its archived evidence.
+This is simpler than incremental interval surgery, at greater CPU cost per batch.
+Archiving first adds states and storage, but one bad file no longer blocks unrelated
+valid snapshots. SQLite avoids another service; PostgreSQL suits distributed
+workers. Older tracker schemas migrate transactionally, preserving bytes, history,
+and usage records. Both ingestion commands commit independently; combined model
+publication is deferred along with the models.
+
+Verification includes the supplied exports, replay equality, fresh/incremental and
+reverse-order loads, vanished contracts, rollback, killed writers, concurrency,
+optional columns, archive recovery, reprocessing, and migration. The supplied
+complete exports retain their expected 3 snapshots, 29 observations, 16 versions,
+and 11 contracts. Production monitoring must compare archive receipt with latest
+published dates and alert on unresolved quarantine. Replacing published historical
+terms requires a separate reviewed correction workflow, still deferred.
 
 AI assistance was used to implement the loader, tests, and documentation. Verification
 included deterministic tests and live requests to the unchanged mock API.

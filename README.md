@@ -119,10 +119,11 @@ rerun the loader against the same database.
 
 ## Commitments tracker
 
-The tracker loader reads all `commitments_YYYY-MM-DD.xlsx` files in a directory.
-It archives each original workbook, keeps normalized observations, and derives
-SCD Type 2 history: a new version when core fields change, without losing the old
-values. Contracts removed from later exports remain available.
+The tracker loader archives received files before validating them. Validated
+snapshots supply normalized observations and SCD Type 2 history: a new version
+when tracked contract fields change, without losing the old values. Incomplete
+files remain available for review and reprocessing; they do not silently replace
+validated terms. Contracts removed from later exports remain available.
 
 ### Install and run on another computer
 
@@ -162,24 +163,38 @@ overrides the default. Input defaults do not depend on environment variables.
 .venv/bin/python ingest_commitments.py --input-dir data/commitments --database storage/demo.sqlite3
 ```
 
-The supplied exports produce **3 snapshots, 29 observations, 16 core versions,
-and 11 latest-known contracts**. The second identical run reports
+The supplied exports produce **3 archived files, 3 published snapshots,
+29 observations, 16 core versions, and 11 latest-known contracts**. The first run
+reports `files_archived: 3`; the second reports `files_archived: 0`,
 `snapshots_added: 0`, `observations_added: 0`, and `snapshots_unchanged: 3`.
-All persisted tracker rows, source bytes, and history boundaries stay identical.
-Layout and duplicate warnings may repeat in stdout; they are not stored changes.
-Exit codes: `0` success, `1` failure, `130` keyboard interruption.
+Identical accepted or quarantined replays preserve stored state. Layout warnings
+may repeat in stdout; they are not stored changes. Exit codes: `0` means no
+unresolved quarantine or input-read errors; `1` means review or retry is needed;
+`130` means keyboard interruption. A nonzero exit does not mean nothing happened:
+files may have been archived and independent valid snapshots may have published.
 
 ### What is stored, and how to read it
 
 | Table/view | Grain and purpose |
 | --- | --- |
-| `commitment_snapshots` | One immutable export per `as_of` date: filename, SHA-256 checksum, original workbook BLOB, detected sheet/header metadata |
-| `commitment_observations` | One row per `(as_of, contract_id)`: normalized core values, extra-column JSON, original row-number references |
+| `commitment_files` | One received file per `(filename, checksum)`: original workbook BLOB, nullable snapshot date, processing state, errors, warnings, and detected layout |
+| `commitment_snapshots` | One validated export per `as_of` date: filename, checksum, and layout metadata; refers to the archived file |
+| `commitment_observations` | One row per `(as_of, contract_id)`: normalized fields, `missing_fields_json`, extra-column JSON, and original row-number references |
 | `contract_history` | One row per `(contract_id, observed_from)`: core values with an exclusive `observed_to`; `NULL` means latest known |
 | `contracts_current` | View of the latest known version of every contract, including disappeared and expired contracts |
 
-Core columns are `contract_id`, `customer_id`, `customer_name`, `start_date`,
-`end_date`, `commitment_usd`, and `status`. Names and statuses are versioned too.
+`CORE` lists all tracked fields. Essential fields are `contract_id`, `customer_id`,
+`start_date`, `end_date`, and `commitment_usd`: they are needed to identify the
+contract and calculate utilization. `customer_name` and `status` are descriptive
+and optional; their supplied changes are versioned too.
+
+An absent descriptive **column** records `NULL` in its observation and the field
+name in `missing_fields_json`. History retains the previous known descriptive
+value, or `NULL` for a new contract. A present but empty **cell** is an explicit
+`NULL` and may create a new history version. This distinction prevents a missing
+header from inventing a name/status change. Essential values are never filled
+from earlier snapshots: missing financial terms quarantine the whole snapshot.
+
 Owner, region, notes, and future extra columns are retained as typed JSON in each
 observation; changes to these alone do not create core versions. Original workbook
 bytes preserve everything, including duplicates and formatting. Snapshot dates
@@ -203,6 +218,7 @@ Python path shown above):
 ```sh
 .venv/bin/python -c "import sqlite3; c=sqlite3.connect('storage/usage.sqlite3'); print(c.execute('SELECT contract_id, commitment_usd, observed_from, observed_to FROM contract_history ORDER BY contract_id, observed_from').fetchall()); c.close()"
 .venv/bin/python -c "import sqlite3; c=sqlite3.connect('storage/usage.sqlite3'); print(c.execute('SELECT contract_id, start_date, end_date, status FROM contracts_current ORDER BY contract_id').fetchall()); c.close()"
+.venv/bin/python -c "import sqlite3; c=sqlite3.connect('storage/usage.sqlite3'); print(c.execute('SELECT filename, as_of, state, errors_json FROM commitment_files ORDER BY as_of, filename, checksum').fetchall()); c.close()"
 ```
 
 Amounts are canonical decimal **TEXT**. Use Python `Decimal`, not SQLite `SUM`,
@@ -212,38 +228,66 @@ have Excel's existing numeric precision, which the loader cannot recover beyond.
 ### New exports, validation, and recovery
 
 Put the next dated file in the input directory and run the same command. Files
-need not be month-end exports. Previously unseen older dates are accepted; history
-is reconstructed chronologically from all stored observations, so arrival order
-does not affect the result. Removing an input file does not remove its archive.
+need not be month-end exports. Previously unseen older dates are accepted if the
+reconstructed history remains valid at every published snapshot date. Removing
+an input file does not remove its archive or its validation findings.
 
-The reader searches all sheets for one complete required header row. It handles
+The reader searches all sheets for one unambiguous row with the essential headers. It handles
 sheet renaming, shifted headers, reordered columns, and the two supplied amount
 header aliases. It trims identifiers, accepts Excel dates, `YYYY-MM-DD`, and
 English `D Mon YYYY`, and parses USD strings such as `$900,000.00`. These date
 rules do not depend on the operating system's locale. Identical duplicates are
-collapsed with source row references; conflicting duplicates fail.
+collapsed with source row references; conflicting duplicates quarantine the snapshot.
 
 Recognized blank/total/footnote rows are skipped. New extra headers are retained
-and listed in warnings. Missing/ambiguous core headers, empty exports, malformed
-rows, formula/error cells in core fields, nonpositive amounts, reversed terms,
-and overlapping customer contracts block the entire batch. Non-overlap is checked
-at every stored snapshot state, including carried-forward disappeared contracts.
-Unknown nonempty status text is retained as descriptive data.
+and listed in warnings. Missing essential headers, ambiguous tables, empty exports,
+malformed rows, formula/error cells in tracked fields, nonpositive amounts,
+reversed terms, and overlapping customer contracts quarantine the whole snapshot.
+There is no partial-row publication. Other valid snapshots may still publish.
+Non-overlap is checked at every published snapshot state, including disappeared
+contracts and later snapshots affected by an older arrival. Unknown nonempty
+status text is retained as descriptive data. Missing descriptive columns and
+empty descriptive cells are allowed, with their meaning recorded explicitly.
 
 For layout errors, review the reported workbook/sheet/row/field, add a reviewed
-alias or parser rule in `ingest_commitments.py`, add a fixture/test, then retry.
+alias or parser rule in `ingest_commitments.py`, add a fixture/test, then reprocess:
+
+```sh
+.venv/bin/python ingest_commitments.py --reprocess
+```
+
+`--reprocess` retries quarantined files from their stored bytes; the original
+files need not remain in the input directory, which can be empty. Normal runs
+automatically resume `pending` files after interruption. Already-published files
+are never reinterpreted silently. The archive states are:
+
+| State | Meaning |
+| --- | --- |
+| `pending` | Original bytes committed; validation/publication has not completed |
+| `quarantined` | Validation or publication failed; diagnostics retained, previous terms still available |
+| `published` | The file supplies a validated snapshot |
+| `superseded` | A corrected file for the same previously unpublished date was accepted; the earlier rejected evidence remains |
+
 Never silently guess a replacement amount column. Formula totals are allowed
 because they are skipped; contract-field formulas are not evaluated.
 
-The same stored date with different workbook bytes is an error, even if only
-formatting changed. Keep originals immutable. Restore the original input file to
-resume ingestion; publish a later-dated export for genuinely later observations.
-Historical corrections require a separate reviewed correction workflow, which is
-not implemented. Do not relabel a historical correction as a later observation.
+If a date has only quarantined input, provide a corrected workbook with that same
+date and rerun: both versions remain archived, and a valid correction can publish.
+Once a date is published, different bytes claiming that date are archived and
+quarantined—even a formatting-only resave. Published-history replacement needs a
+separate reviewed correction workflow, which is not implemented. Do not relabel
+a historical correction as a later observation. Removing a conflicting input file
+does not erase its unresolved quarantine.
 
-Each run parses first, obtains a SQLite write lock, rechecks snapshot identities,
-and commits the whole batch once. A crash before commit rolls back; a crash after
-commit is safe to replay. Concurrent writers serialize; the lock timeout is 60
+Archival commits before validation, so parser failures or a later process crash
+cannot lose received evidence. A file that cannot be read from disk cannot be
+archived; it is reported as an input-read error. Validation happens outside the
+publication lock, and publication decisions are rechecked under that lock. Each
+candidate snapshot is validated as a whole; failed candidates preserve existing
+observations and history while valid candidates can proceed. Readers never see
+half of an updated history. A crash before publication commit leaves archived
+pending input for recovery; after commit, retrying is a no-op. Concurrent writers
+serialize; the lock timeout is 60
 seconds per locking operation, after which the contender fails and should retry.
 WAL readers can see the old complete state while the new one is being written.
 Keep the database on persistent local disk, not a network filesystem. Usage and
@@ -258,8 +302,17 @@ writes or delete its `-wal`/`-shm` files:
 .venv/bin/python -c "import sqlite3; s=sqlite3.connect('storage/usage.sqlite3'); d=sqlite3.connect('storage/backup.sqlite3'); s.backup(d); d.close(); s.close()"
 ```
 
+The first run against an older tracker database migrates its schema automatically
+inside a transaction. Existing workbook bytes, history boundaries, and usage
+records are preserved; descriptive fields become nullable and existing observed
+fields are marked present. Make a backup before upgrading. To restore it, stop
+both loaders and all database readers, then use the backup as the database; do not
+mix an old main file with WAL files from a different database state.
+
 For scheduled runs, use absolute paths for Python, input directory, and database;
-capture stdout/stderr, alert on failures or missing runs, and retry after a delay.
+capture stdout/stderr, alert on failures or missing runs, and retry transient errors
+after a delay. Monitor unresolved quarantines and the latest published snapshot
+date: last-known terms can be valid but stale while a newer export is quarantined.
 No credentials are required for this loader. Missing files do not delete records,
 so monitor expected export delivery separately from successful ingestion.
 
@@ -273,18 +326,22 @@ Tests use temporary files and need no running API. They compare complete stored
 state on replay, incremental versus fresh loads, out-of-order arrivals, vanished
 contracts, normalization, drift failures, amendments, and inclusive renewal
 boundaries. Real process tests cover a killed writer and overlapping fresh loads;
-failure tests verify batch rollback and preservation of existing usage records.
+failure tests verify candidate rollback, retained raw evidence, and preservation
+of existing usage records. Additional cases cover optional headers versus empty
+cells, quarantined replay, archive-only recovery, reprocessing, and schema migration.
 
 | Choice | Benefit | Cost / alternative |
 | --- | --- | --- |
 | SQLite | Portable, durable, no service to operate | One local writer; PostgreSQL for distributed workers |
-| Archive + observations + SCD | Source evidence and convenient history/current queries | More storage; observations alone defer version derivation to readers |
+| Archive before validation + observations + SCD | Rejected evidence survives; convenient history/current queries | More storage and explicit quarantine/reprocessing states |
 | Explicit header aliases | Predictable, reviewable financial interpretation | Unknown required names block; fuzzy matching risks silent errors |
-| Rebuild history only for new snapshots | Simple, deterministic handling of older arrivals | Work grows with retained observations; incremental maintenance is more complex |
-| Whole-batch transaction | Simple crash recovery, no partially published history | An invalid file blocks all new files; interruption repeats work |
+| Rebuild history for each publication candidate | Validates older arrivals against later published states | More work per batch; incremental maintenance is more complex |
+| Whole-snapshot validation with quarantine | Valid files can proceed; no partially published contract rows | Published data may lag the archive, so freshness and quarantine need monitoring |
+| Optional descriptive columns | Missing names/statuses do not block valid financial terms | Presence flags are needed to distinguish absence from an explicit empty value |
 
 For these small workbooks, parsing in memory and rebuilding history is sufficient.
-Unchanged replays still read/validate inputs, but skip observation and history writes.
+Unchanged replays recognize archived identities and avoid new stored rows;
+quarantined bytes are retried explicitly with `--reprocess`.
 At larger scale, stream parsing, durable staging, incremental history maintenance,
 and a server database are possible next steps.
 
