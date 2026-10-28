@@ -94,7 +94,7 @@ late arrivals, corrections, voids, exact decimals, reruns, reconciliation, kille
 writers, and concurrent processes. A black-box smoke test compares incremental,
 reconciled, and fresh loads without inspecting or modifying the API implementation.
 
-The agreed scope is usage ingestion. Contract snapshot history, financial models,
+The implemented scope is usage ingestion and contract snapshot history. Financial models,
 CSV model exports, `run.py`, pipeline containers, and Kubernetes deployment are
 not implemented. The provided `mock_api/` and `data/` remain unchanged. Historical
 usage versions, durable checkpoints, central monitoring, and distributed execution
@@ -105,8 +105,44 @@ equivalent scheduler with daily runs, delayed retries, and explicit backfill and
 reprocessing jobs. Measure first-arrival delays and revisit the overlap or add
 scheduled reconciliation if evidence warrants it. Alert on failed or missing runs
 and stale data; validate changes in CI before deployment. On spot nodes, durable
-staging and atomic publication would avoid refetching entire interrupted runs. Finance workbook
-layout detection remains part of the future contract-ingestion work, not this loader.
+staging and atomic publication would avoid refetching entire interrupted runs. For
+Finance exports, monitor file delivery as well as successful ingestion; alert on
+layout failures and unusual row-count changes. Review new aliases with Finance
+and add fixture coverage before deploying parser changes.
+
+## Contract snapshots and history
+
+`ingest_commitments.py` uses openpyxl and the same local SQLite database, with
+its own transaction and tables. Original workbook bytes plus checksums preserve
+source evidence; normalized observations preserve all extra columns and duplicate
+row references. SCD Type 2 history versions customer identity/name, inclusive
+term dates, amount, and status. Extra-column changes stay in observations.
+Observation dates come from filenames; they are not legal amendment dates.
+Disappearance never deletes a contract or closes its last known version.
+
+Header discovery uses the full required field set and explicit aliases, handling
+the supplied sheet/column changes without fuzzy guesses. Bad or ambiguous layouts,
+malformed core values, conflicting duplicates, and overlapping customer terms
+block the entire batch. Exact duplicates are collapsed with warnings. Currency
+strings and dates are normalized explicitly, independent of OS locale; core-field
+formulas are rejected rather than trusting potentially stale cached values.
+
+Parsing precedes locking. Under the write lock, matching snapshot checksums are
+no-ops; a changed file claiming an existing date fails. New observations trigger
+a deterministic history rebuild from the retained archive. This supports older
+arrivals without complicated retroactive interval surgery. It uses more CPU than
+incremental history maintenance, but is appropriate for these small trackers.
+Source archival costs storage; observations alone would save a derived table but
+make downstream version queries harder. SQLite avoids another service, while
+PostgreSQL would suit distributed workers. Both ingestion commands commit
+independently; combined model publication is deferred along with the models.
+
+Verification covers all three exports, exact persisted-state equality on replay,
+fresh versus incremental and reverse-order loads, disappeared/reappearing
+contracts, transaction rollback, killed writers, and concurrent fresh loads.
+The real load yields 3 snapshots, 29 observations, 16 versions, and 11 contracts;
+an immediate rerun adds nothing. A reviewed historical-correction workflow and
+automated export-delivery monitoring remain future work.
 
 AI assistance was used to implement the loader, tests, and documentation. Verification
 included deterministic tests and live requests to the unchanged mock API.
