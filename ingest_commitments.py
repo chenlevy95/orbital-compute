@@ -6,7 +6,8 @@ from all observations in snapshot-date order, so the arrival order of files does
 not matter. An invalid file is skipped and reported, and the run exits 1; the other
 files still load. A skipped file is never stored, so once it is fixed the next run
 loads it and the rebuild puts it in place. A contract that disappears from a later
-snapshot keeps its last known version.
+snapshot keeps its last known version. Customer name and status are descriptive:
+they may be missing or empty, are stored as NULL, and produce a warning.
 
 Snapshot dates are observation dates, not amendment effective dates.
 """
@@ -28,6 +29,10 @@ import db
 
 FIELDS = ('contract_id', 'customer_id', 'customer_name', 'start_date',
           'end_date', 'commitment_usd', 'status')
+# The models need only the mandatory fields. A descriptive field may be missing from
+# the workbook or empty in a row: it is stored as NULL and reported as a warning.
+DESCRIPTIVE = ('customer_name', 'status')
+MANDATORY = tuple(field for field in FIELDS if field not in DESCRIPTIVE)
 
 # Normalized workbook header -> field. Finance renames columns between exports;
 # add an alias here once its meaning is confirmed. Unknown columns are ignored.
@@ -97,7 +102,12 @@ def parse_text(value):
     return str(value).strip()
 
 
-PARSERS = {'start_date': parse_date, 'end_date': parse_date, 'commitment_usd': parse_money}
+def parse_optional(value):
+    return None if blank(value) else str(value).strip()
+
+
+PARSERS = {'start_date': parse_date, 'end_date': parse_date, 'commitment_usd': parse_money,
+           'customer_name': parse_optional, 'status': parse_optional}
 
 
 def snapshot_date(filename):
@@ -108,7 +118,7 @@ def snapshot_date(filename):
 
 
 def find_table(workbook, filename):
-    """Return (sheet, header_row, {field: column index}) for the one row naming every field."""
+    """Return (sheet, header_row, {field: column index}) for the one row naming every mandatory field."""
     found = []
     for sheet in workbook:
         for row in sheet.iter_rows():
@@ -119,10 +129,10 @@ def find_table(workbook, filename):
                     raise TrackerError(f'{filename}:{sheet.title}:{cell.row}: two columns map to {field}')
                 if field:
                     columns[field] = index
-            if set(FIELDS) <= set(columns):
+            if set(MANDATORY) <= set(columns):
                 found.append((sheet, row[0].row, columns))
     if len(found) != 1:
-        raise TrackerError(f'{filename}: expected one header row with {", ".join(FIELDS)}; '
+        raise TrackerError(f'{filename}: expected one header row with {", ".join(MANDATORY)}; '
                            f'found {len(found)}. Check the layout and ALIASES.')
     return found[0]
 
@@ -138,7 +148,9 @@ def parse_snapshot(path):
         rows = {}
         for number, cells in enumerate(sheet.iter_rows(min_row=header_row + 1, values_only=True),
                                        header_row + 1):
-            values = {field: cells[index] for field, index in columns.items()}
+            # A descriptive column missing from the workbook reads as empty.
+            values = dict.fromkeys(DESCRIPTIVE)
+            values.update((field, cells[index]) for field, index in columns.items())
             contract = values['contract_id']
             # Skip blank lines, the TOTAL row and '*' footnotes; none has a customer.
             if blank(values['customer_id']) and (
@@ -163,7 +175,18 @@ def parse_snapshot(path):
 
 
 def create_schema(connection):
-    columns = ', '.join(f'{field} TEXT NOT NULL' for field in FIELDS)
+    # Databases created before descriptive fields became nullable have NOT NULL on them.
+    # SQLite can't drop a constraint, so move the observations aside, recreate the
+    # tables, copy them back and rebuild the derived history.
+    old = {name: notnull for _, name, _, notnull, _, _ in
+           connection.execute('PRAGMA table_info(commitment_observations)')}
+    migrate = bool(old.get('customer_name'))
+    if migrate:
+        connection.execute('DROP VIEW contracts_current')
+        connection.execute('DROP TABLE contract_history')
+        connection.execute('ALTER TABLE commitment_observations RENAME TO observations_before_nullable')
+    columns = ', '.join(f'{field} TEXT' + (' NOT NULL' if field in MANDATORY else '')
+                        for field in FIELDS)
     connection.execute('''CREATE TABLE IF NOT EXISTS commitment_snapshots (
         as_of TEXT PRIMARY KEY, filename TEXT NOT NULL, checksum TEXT NOT NULL)''')
     connection.execute(f'''CREATE TABLE IF NOT EXISTS commitment_observations (
@@ -175,6 +198,22 @@ def create_schema(connection):
         PRIMARY KEY (contract_id, observed_from))''')
     connection.execute('''CREATE VIEW IF NOT EXISTS contracts_current AS
         SELECT * FROM contract_history WHERE observed_to IS NULL''')
+    if migrate:
+        connection.execute(f'INSERT INTO commitment_observations SELECT as_of, {", ".join(FIELDS)} '
+                           'FROM observations_before_nullable')
+        connection.execute('DROP TABLE observations_before_nullable')
+        rebuild_history(connection)
+
+
+def unchanged(previous, row):
+    """A descriptive value missing from a snapshot is not a change: it keeps the version.
+
+    Any other difference starts a new version that stores the row as received, NULLs
+    included, so no version mixes values from different snapshots.
+    """
+    return previous is not None and all(
+        new == old or (new is None and field in DESCRIPTIVE)
+        for field, old, new in zip(FIELDS, previous, row))
 
 
 def check_no_overlap(current, as_of):
@@ -194,7 +233,7 @@ def rebuild_history(connection):
     for as_of in snapshots:
         for row in connection.execute(f'SELECT {", ".join(FIELDS)} FROM commitment_observations '
                                       'WHERE as_of=? ORDER BY contract_id', (as_of,)).fetchall():
-            if current.get(row[0]) == row:
+            if unchanged(current.get(row[0]), row):
                 continue
             connection.execute('UPDATE contract_history SET observed_to=? '
                                'WHERE contract_id=? AND observed_to IS NULL', (as_of, row[0]))
@@ -216,6 +255,8 @@ def status_warnings(connection):
             'JOIN commitment_observations o USING (contract_id) '
             'GROUP BY c.contract_id ORDER BY c.contract_id'):
         label = header(status)
+        if status is None:
+            continue  # reported once, by missing_descriptive(), when its snapshot loads
         if label not in KNOWN_STATUSES:
             warnings.append(f'{contract_id}: unknown status {status!r} in snapshot {last_seen}; '
                             'confirm its meaning with Finance and add it to KNOWN_STATUSES')
@@ -223,6 +264,20 @@ def status_warnings(connection):
             warnings.append(f'{contract_id}: status {status!r} but end date {end_date} is after '
                             f'snapshot {last_seen}; still tracked by its dates until Finance '
                             'corrects the end date or the status')
+    return warnings
+
+
+def missing_descriptive(filename, rows):
+    """Warn about descriptive fields left empty in a newly loaded snapshot."""
+    warnings = []
+    for field in DESCRIPTIVE:
+        index = FIELDS.index(field)
+        empty = [row[0] for row in rows if row[index] is None]
+        if len(empty) == len(rows):
+            warnings.append(f'{filename}: no {field} values (column missing or empty); '
+                            'loaded without them')
+        elif empty:
+            warnings.append(f'{filename}: no {field} for {", ".join(empty)}; loaded without it')
     return warnings
 
 
@@ -261,6 +316,7 @@ def ingest(input_dir, database):
         create_schema(connection)
         # a counter of new snapshots successfully added during this ingestion run
         added = 0
+        warnings = []
         for filename, as_of, checksum, rows in snapshots:
             # Some checks (overlaps, changed contents) need the stored data, so load
             # each file in a savepoint and undo only that file if one fails.
@@ -270,6 +326,7 @@ def ingest(input_dir, database):
                     # An older snapshot arriving late can change later versions, so rebuild all.
                     rebuild_history(connection)
                     added += 1
+                    warnings += missing_descriptive(filename, rows)
             except TrackerError as exc:
                 connection.execute('ROLLBACK TO snapshot')
                 errors.append(str(exc))
@@ -278,7 +335,7 @@ def ingest(input_dir, database):
         result = {'snapshots_added': added, 'snapshots': count('commitment_snapshots'),
                   'history_versions': count('contract_history'),
                   'contracts': count('contracts_current'), 'errors': errors,
-                  'warnings': status_warnings(connection)}
+                  'warnings': warnings + status_warnings(connection)}
         connection.commit()
         return result
     except BaseException:

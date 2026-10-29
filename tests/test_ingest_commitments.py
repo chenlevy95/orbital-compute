@@ -17,6 +17,7 @@ SOURCE = Path(__file__).resolve().parents[1] / 'data' / 'commitments'
 HEADERS = ['Contract ID', 'Customer ID', 'Customer', 'Start Date', 'End Date',
            'Commit (USD)', 'Status']
 ROW = ['K-1', 'C1', 'Customer', date(2026, 1, 1), date(2026, 6, 30), 100, 'Active']
+NO_COMMITMENT = [name for name in HEADERS if name != 'Commit (USD)']  # a mandatory field
 
 
 def write_book(folder, rows, as_of='2026-07-31', headers=HEADERS):
@@ -96,7 +97,7 @@ class TrackerTests(unittest.TestCase):
 
     def test_invalid_file_is_skipped_and_loads_once_fixed(self):
         self.copy('2026-07-31', '2026-09-28')
-        broken = write_book(self.input, [ROW], as_of='2026-08-31', headers=HEADERS[:-1])
+        broken = write_book(self.input, [ROW], as_of='2026-08-31', headers=NO_COMMITMENT)
         result = tracker.ingest(self.input, self.db)
         self.assertEqual((result['snapshots_added'], len(result['errors'])), (2, 1))
         self.assertIn('commitments_2026-08-31.xlsx', result['errors'][0])
@@ -115,7 +116,7 @@ class TrackerTests(unittest.TestCase):
         tracker.ingest(self.input, self.db)
         before = state(self.db)
         cases = {
-            'missing header': dict(headers=HEADERS[:-1]),
+            'missing header': dict(headers=NO_COMMITMENT),
             'bad amount': dict(rows=[ROW[:5] + ['lots', 'Active']]),
             'conflicting duplicate': dict(rows=[ROW, ROW[:5] + [200, 'Active']]),
             'overlapping contracts': dict(rows=[ROW, ['K-2', 'C1', 'x', date(2026, 6, 30),
@@ -163,6 +164,75 @@ class TrackerTests(unittest.TestCase):
         rows[2][-1], rows[3][4] = 'Active', date(2026, 7, 15)
         write_book(self.input, rows, as_of='2026-08-31')
         self.assertEqual(tracker.ingest(self.input, self.db)['warnings'], [])
+
+    def test_missing_descriptive_columns_load_as_null_with_a_warning(self):
+        write_book(self.input, [ROW[:2] + ROW[3:6]],
+                   headers=[name for name in HEADERS if name not in ('Customer', 'Status')])
+        result = tracker.ingest(self.input, self.db)
+        self.assertEqual((result['snapshots_added'], result['errors']), (1, []))
+        self.assertEqual(result['warnings'], [
+            'commitments_2026-07-31.xlsx: no customer_name values (column missing or empty); '
+            'loaded without them',
+            'commitments_2026-07-31.xlsx: no status values (column missing or empty); '
+            'loaded without them'])
+        self.assertEqual(state(self.db)['contract_history'],
+                         [('K-1', 'C1', None, '2026-01-01', '2026-06-30', '100.00', None,
+                           '2026-07-31', None)])
+        # Reported once, when the snapshot loads.
+        self.assertEqual(tracker.ingest(self.input, self.db)['warnings'], [])
+
+    def test_empty_descriptive_cells_load_as_null_with_a_warning(self):
+        write_book(self.input, [ROW, ['K-2', 'C2', '  ', date(2026, 1, 1), date(2026, 6, 30), 100, None]])
+        result = tracker.ingest(self.input, self.db)
+        self.assertEqual((result['contracts'], result['errors']), (2, []))
+        self.assertEqual(result['warnings'], [
+            'commitments_2026-07-31.xlsx: no customer_name for K-2; loaded without it',
+            'commitments_2026-07-31.xlsx: no status for K-2; loaded without it'])
+
+    def test_empty_mandatory_cell_still_rejects_the_file(self):
+        write_book(self.input, [ROW[:1] + [None] + ROW[2:]])
+        result = tracker.ingest(self.input, self.db)
+        self.assertEqual((result['snapshots_added'], len(result['errors'])), (0, 1))
+        self.assertIn('empty value', result['errors'][0])
+
+    def test_missing_descriptive_value_is_not_an_amendment(self):
+        write_book(self.input, [ROW])
+        no_name = ROW[:2] + [None] + ROW[3:]
+        write_book(self.input, [no_name], as_of='2026-08-31')  # name dropped, nothing else
+        write_book(self.input, [ROW], as_of='2026-09-28')       # name back
+        tracker.ingest(self.input, self.db)
+        self.assertEqual(state(self.db)['contract_history'],
+                         [('K-1', 'C1', 'Customer', '2026-01-01', '2026-06-30', '100.00', 'Active',
+                           '2026-07-31', None)])
+
+        # A real amendment in a snapshot without the name stores the row as received.
+        write_book(self.input, [no_name[:5] + [200, 'Active']], as_of='2026-10-31')
+        tracker.ingest(self.input, self.db)
+        self.assertEqual(state(self.db)['contract_history'][-1],
+                         ('K-1', 'C1', None, '2026-01-01', '2026-06-30', '200.00', 'Active',
+                          '2026-10-31', None))
+
+    def test_database_from_before_nullable_fields_is_migrated(self):
+        self.copy('2026-07-31', '2026-08-31')
+        old = self.tmp / 'old.sqlite3'
+        tracker.ingest(self.input, old)
+        # Recreate the earlier schema, where every field was NOT NULL.
+        columns = ', '.join(f'{field} TEXT NOT NULL' for field in tracker.FIELDS)
+        with closing(sqlite3.connect(old)) as connection:
+            connection.executescript(f'''
+                ALTER TABLE commitment_observations RENAME TO saved;
+                CREATE TABLE commitment_observations (
+                    as_of TEXT NOT NULL REFERENCES commitment_snapshots(as_of), {columns},
+                    PRIMARY KEY (as_of, contract_id));
+                INSERT INTO commitment_observations SELECT * FROM saved;
+                DROP TABLE saved;''')
+        write_book(self.input, [ROW[:2] + [None] + ROW[3:]], as_of='2026-09-28')
+
+        result = tracker.ingest(self.input, old)
+        self.assertEqual((result['snapshots_added'], result['errors']), (1, []))
+        fresh = self.tmp / 'fresh.sqlite3'
+        tracker.ingest(self.input, fresh)
+        self.assertEqual(state(old), state(fresh))
 
 
 if __name__ == '__main__':
