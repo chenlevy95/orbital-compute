@@ -7,8 +7,10 @@ Two loaders write to one SQLite database (`storage/usage.sqlite3` by default):
 - `ingest_commitments.py` loads Finance's Excel snapshots into SCD Type 2 contract
   history.
 
-`run.py` (`up` / `export` / `down`), the Part 2 models and the Kubernetes deployment
-are **not implemented yet**. Design decisions are in [NOTES.md](NOTES.md).
+`build_models.py` then builds the two Part 2 tables from what they loaded.
+
+`run.py` (`up` / `export` / `down`) and the Kubernetes deployment are **not
+implemented yet**. Design decisions are in [NOTES.md](NOTES.md).
 
 ## Setup
 
@@ -71,6 +73,22 @@ An invalid file is skipped, and the run reports which file and why, and exits 1.
 other files still load. Nothing from the skipped file is stored, so to backfill it,
 fix it (or add a new header to `ALIASES` in `ingest_commitments.py`) and run the
 loader again. History is rebuilt in date order, so the file lands in the right place.
+
+## Models
+
+Run this after both loaders:
+
+```sh
+.venv/bin/python build_models.py   # rebuild both tables
+```
+
+It rebuilds these in one transaction, so running it again gives identical tables:
+
+- `contract_utilization_daily`: one row per contract per day, from the start date
+  to the earlier of the end date and the last usage date loaded, using the latest
+  known terms.
+- `unattributed_usage_daily`: non-void spend on days when the customer had no
+  active contract.
 
 ## Tests
 

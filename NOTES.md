@@ -76,9 +76,27 @@ Finance removes from a later snapshot keeps its last version open in
 `contracts_current`. `observed_from` is the date of the snapshot where a version
 first appears, not the date the amendment took effect.
 
+## Models
+
+`build_models.py` rebuilds both tables in full on every run, from
+`contracts_current` (the latest known terms) and `non_void_usage`. A full rebuild
+is cheap at this size, and it means a rerun can't drift from its inputs.
+
+- Whether a contract is active on a day depends only on its dates. Finance's
+  `status` column is a label and isn't used.
+- Every day of the term gets a row, including days with no spend
+  (`consumed_usd = 0`).
+- "Last usage date loaded" is the latest `usage_date` in `usage`, counting voided
+  records, because it marks how far the load has reached.
+- Spend is summed with `Decimal` from the stored decimal text. Source amounts and
+  their sums are exact. Expected and projected spend are rounded to cents.
+- `utilization_pct` is the ratio from the spec (1.0 means on track), rounded to
+  6 decimal places. It is not multiplied by 100. `at_risk` is computed from the
+  unrounded values.
+
 ## Concurrency and recovery
 
-Both loaders use SQLite in WAL mode. Each run is a single `BEGIN IMMEDIATE`
+The loaders and the model build use SQLite in WAL mode. Each run is a single `BEGIN IMMEDIATE`
 transaction:
 
 - A killed run rolls back.
@@ -90,7 +108,7 @@ run starts its scan from the beginning. At this data size that's fine.
 
 ## Left out on purpose
 
-- I didn't build the Part 2 models, `run.py` or the Kubernetes deployment.
+- I didn't build `run.py` or the Kubernetes deployment.
 - Workbooks and rejection reasons are not stored in the database. Errors go to the
   run's output, and the source files remain the evidence.
 - Replacing a snapshot that was already loaded isn't supported. A changed file for
