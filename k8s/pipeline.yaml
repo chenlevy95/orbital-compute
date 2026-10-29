@@ -1,0 +1,105 @@
+# The pipeline: its settings, its storage and its daily schedule.
+# Applied by `python run.py up`, after mock_api/k8s/billing-api.yaml has created the
+# namespace. run.py also creates two objects that don't belong in git:
+#   Secret    billing-api-credentials  (BILLING_CLIENT_ID, BILLING_CLIENT_SECRET)
+#   ConfigMap orbital-commitments      (the workbooks in data/commitments/)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orbital-pipeline-config
+  namespace: orbital
+data:
+  BILLING_API_URL: http://billing-api.orbital.svc.cluster.local:8765
+  USAGE_DATABASE: /var/lib/orbital/usage.sqlite3
+  COMMITMENTS_DIR: /data/commitments
+  # Longer than a whole run, so a run started by hand waits for the one in progress.
+  DB_LOCK_TIMEOUT_SECONDS: "900"
+---
+# The SQLite file lives here. kind's default StorageClass gives a folder on the node
+# that outlives every pod (and is deleted with the cluster).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orbital-storage
+  namespace: orbital
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: orbital-pipeline
+  namespace: orbital
+spec:
+  schedule: "0 3 * * *"
+  timeZone: Etc/UTC
+  # Scheduled runs never overlap. Runs started by hand bypass this, so the database's
+  # write lock is what actually keeps concurrent runs apart.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A killed or failed run is retried in a fresh pod. Each run is one transaction
+      # per step, so a retry starts from the last committed state.
+      backoffLimit: 6
+      activeDeadlineSeconds: 3600
+      # A pod evicted or preempted doesn't use up a retry. With a failure policy the
+      # replacement starts only once the old pod has fully stopped.
+      podFailurePolicy:
+        rules:
+          - action: Ignore
+            onPodConditions:
+              - type: DisruptionTarget
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: orbital-pipeline
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          containers:
+            - name: pipeline
+              image: orbital-pipeline:1.0
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: orbital-pipeline-config
+                - secretRef:
+                    name: billing-api-credentials
+              volumeMounts:
+                - name: storage
+                  mountPath: /var/lib/orbital
+                - name: commitments
+                  mountPath: /data/commitments
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: storage
+              persistentVolumeClaim:
+                claimName: orbital-storage
+            - name: commitments
+              configMap:
+                name: orbital-commitments
+            - name: tmp
+              emptyDir: {}

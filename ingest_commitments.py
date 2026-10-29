@@ -290,7 +290,7 @@ def ingest(input_dir, database):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--input-dir', default='data/commitments')
+    parser.add_argument('--input-dir', default=os.getenv('COMMITMENTS_DIR', 'data/commitments'))
     parser.add_argument('--database', default=os.getenv('USAGE_DATABASE', 'storage/usage.sqlite3'))
     args = parser.parse_args()
     try:

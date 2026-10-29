@@ -1,0 +1,8 @@
+# Only requirements.txt and the pipeline modules go into the image.
+*
+!requirements.txt
+!db.py
+!ingest_usage.py
+!ingest_commitments.py
+!build_models.py
+!pipeline.py

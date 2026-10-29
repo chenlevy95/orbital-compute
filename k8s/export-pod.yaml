@@ -1,0 +1,39 @@
+# A short-lived helper pod that `python run.py export` starts to read the tables
+# out of the database, then deletes. It runs the pipeline image but only reads:
+# run.py execs `python build_models.py --print TABLE` in it.
+# The volume isn't mounted read-only because SQLite readers in WAL mode still
+# write to the shared-memory index file next to the database.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orbital-export
+  namespace: orbital
+  labels:
+    app.kubernetes.io/name: orbital-export
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+  containers:
+    - name: export
+      image: orbital-pipeline:1.0
+      imagePullPolicy: IfNotPresent
+      command: [sleep, "600"]
+      env:
+        - name: USAGE_DATABASE
+          value: /var/lib/orbital/usage.sqlite3
+      volumeMounts:
+        - name: storage
+          mountPath: /var/lib/orbital
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+  volumes:
+    - name: storage
+      persistentVolumeClaim:
+        claimName: orbital-storage

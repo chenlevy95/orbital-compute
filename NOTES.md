@@ -122,9 +122,81 @@ transaction:
 The cost is that the write lock is held while waiting on HTTP, and an interrupted
 run starts its scan from the beginning. At this data size that's fine.
 
+## Part 3: Kubernetes
+
+The CronJob runs `pipeline.py`, which runs usage ingestion, commitments ingestion
+and the model build in order, each in its own transaction. It runs every step even
+if an earlier one failed, so a rejected workbook doesn't stop fresh usage from
+reaching the models. It exits with the worst exit code, so the Job is marked failed
+and retried. A run killed between steps leaves committed, consistent tables, and the
+next run catches up.
+
+**Storage.** The SQLite file lives on a PersistentVolumeClaim (kind's default
+`standard` class, a folder on the node). I kept SQLite instead of running Postgres
+because its transactions already give what the preemption and concurrency rules
+need, with no rewrite:
+
+- A pod killed at any moment loses only its uncommitted transaction. The WAL rolls
+  back when the file is next opened. Verified by deleting the pod during the first
+  backfill: the Job's next pod started a clean full scan and committed everything.
+- Two runs at the same time queue on `BEGIN IMMEDIATE`. The lock wait
+  (`DB_LOCK_TIMEOUT_SECONDS`, 900 s in the cluster) is longer than a run, because the
+  usage step holds the lock while it calls the API. If a run still times out, it exits
+  1 and the Job retries it. Verified: two simultaneous runs give the same export,
+  byte for byte, as a single run.
+- `concurrencyPolicy: Forbid` only stops the scheduler from overlapping runs. Runs
+  started by hand bypass it, so the lock is the real guarantee.
+
+Trade-off: the volume is `ReadWriteOnce` on one node. On a real multi-node cluster of
+preemptible nodes, the disk would go away with its node, and pods on other nodes
+couldn't share it. There I'd move to Postgres or a managed database on stable nodes,
+replace `BEGIN IMMEDIATE` with an advisory lock, and keep the same one-transaction-per-step design.
+
+**Job settings.**
+- `restartPolicy: Never` and `backoffLimit: 6`: each retry is a fresh pod, and failed
+  pods' logs are kept.
+- `podFailurePolicy` ignores `DisruptionTarget`, so a preempted or evicted pod
+  doesn't use up a retry. The replacement starts only after the old pod has stopped.
+- `activeDeadlineSeconds: 3600` stops a hung run.
+- `startingDeadlineSeconds` and history limits are set too.
+
+**Configuration and credentials** never go in the image.
+- The image has code and libraries only (see `.dockerignore`).
+- Settings come from the ConfigMap `orbital-pipeline-config`.
+- Credentials come from the Secret `billing-api-credentials`, created by
+  `run.py up` from your environment, falling back to the assignment's demo values.
+  That fallback means the demo secret is in `run.py`. It's public in the assignment
+  anyway, and in production it would come from a secret manager.
+- The Finance workbooks are data, not code, so they go in the ConfigMap
+  `orbital-commitments` and not in the image. A new month-end file needs no
+  rebuild. ConfigMaps are limited to 1 MiB, which is plenty for a few
+  spreadsheets. A real feed would come from object storage.
+
+**Export.** `run.py export` starts a helper pod from the pipeline image with the
+volume mounted, runs `build_models.py --print TABLE` in it with `kubectl exec`, and
+writes stdout to the CSV byte for byte. It only reads the last committed tables and
+never rebuilds them. I used stdout instead of `kubectl cp` because `cp` needs `tar`
+in the container and handles Windows paths differently.
+
+**Hardening.** The pipeline pod runs as a non-root user with a read-only root
+filesystem, no capabilities and no privilege escalation, plus resource requests and
+a memory limit. Every `kubectl` call in `run.py` names the `kind-orbital` context, so
+it can't touch another cluster.
+
+**Verified end to end** with the grader's sequence:
+1. Backfill with the pod deleted partway through.
+2. `AS_OF=2026-09-28`, then an incremental run.
+3. A repeat run.
+4. Two runs at once.
+5. `down`, `up`, then one full run.
+
+The exports from steps 2–5 are byte-identical.
+
 ## Left out on purpose
 
-- I didn't build `run.py` or the Kubernetes deployment.
+- Images are tagged `1.0` and reloaded on every `up`, not tagged by content. A
+  running pod keeps its old image until its run ends.
+- No alerting on failed Jobs. In production a failed or missing run would page.
 - Workbooks and rejection reasons are not stored in the database. Errors go to the
   run's output, and the source files remain the evidence.
 - Replacing a snapshot that was already loaded isn't supported. A changed file for
@@ -134,7 +206,6 @@ run starts its scan from the beginning. At this data size that's fine.
 
 ## Next steps
 
-- Build the Part 2 models, `run.py` and the Kubernetes CronJob.
 - Validate commitment snapshots in memory, then write once. Read the stored
   observations, add each new file in memory, and rebuild history with a pure function
   that returns rows instead of writing them. Drop any file that fails a check, then

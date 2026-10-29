@@ -3,6 +3,7 @@
 Run it after both loaders:
 
     python build_models.py [--database PATH] [--export OUT_DIR]
+    python build_models.py --print TABLE   # one table as CSV on stdout, no rebuild
 
 Inputs (written by the loaders, never changed here):
 
@@ -235,32 +236,55 @@ def build(database):
         connection.close()
 
 
+TABLES = {'contract_utilization_daily': UTILIZATION_COLUMNS,
+          'unattributed_usage_daily': UNATTRIBUTED_COLUMNS}
+
+
+def write_table(connection, table, file):
+    """Write one table to an open text file as CSV with a header row, ordered by key.
+
+    Values are written as stored, so amounts keep their exact decimal text, with
+    \n line endings on every OS.
+    """
+    columns = TABLES[table]
+    try:
+        # Both tables are keyed by (first column, date).
+        rows = connection.execute(
+            f'SELECT {", ".join(columns)} FROM {table} ORDER BY 1, date').fetchall()
+    except sqlite3.OperationalError:
+        raise ModelError(f'{table} missing; run build_models.py first') from None
+    writer = csv.writer(file, lineterminator='\n')
+    writer.writerow(columns)
+    writer.writerows(rows)
+
+
 def export(database, out_dir):
-    """Write both tables to OUT_DIR as CSV with a header row, ordered by key.
+    """Write both tables to OUT_DIR as CSV.
 
     The files are OUT_DIR/contract_utilization_daily.csv and
     OUT_DIR/unattributed_usage_daily.csv, with the column names the assignment
-    gives, as run.py export (Part 3) must produce. Values are written as stored,
-    so amounts keep their exact decimal text. Output is UTF-8 with \\n line endings
-    on every OS, so two exports of the same tables are byte-identical. It reads the
-    last committed tables, so it's safe to run while a build is in progress.
+    gives. Output is UTF-8, so two exports of the same tables are byte-identical.
+    It reads the last committed tables, so it's safe to run while a build is in
+    progress.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     connection = db.connect(database)
     try:
-        for table, columns in (('contract_utilization_daily', UTILIZATION_COLUMNS),
-                               ('unattributed_usage_daily', UNATTRIBUTED_COLUMNS)):
-            try:
-                # Both tables are keyed by (first column, date).
-                rows = connection.execute(
-                    f'SELECT {", ".join(columns)} FROM {table} ORDER BY 1, date').fetchall()
-            except sqlite3.OperationalError:
-                raise ModelError(f'{table} missing; run build_models.py first') from None
+        for table in TABLES:
             with open(out_dir / f'{table}.csv', 'w', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file, lineterminator='\n')
-                writer.writerow(columns)
-                writer.writerows(rows)
+                write_table(connection, table, file)
+    finally:
+        connection.close()
+
+
+def print_table(database, table):
+    """Write one table as CSV to stdout, read-only. run.py export uses this in the cluster."""
+    connection = db.connect(database)
+    try:
+        out = open(sys.stdout.fileno(), 'w', newline='', encoding='utf-8', closefd=False)
+        with out:
+            write_table(connection, table, out)
     finally:
         connection.close()
 
@@ -273,8 +297,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--database', default=os.getenv('USAGE_DATABASE', 'storage/usage.sqlite3'))
     parser.add_argument('--export', metavar='OUT_DIR', help='also write both tables as CSV')
+    parser.add_argument('--print', metavar='TABLE', choices=TABLES, dest='print_table',
+                        help='only write this table to stdout as CSV, without rebuilding')
     args = parser.parse_args()
     try:
+        if args.print_table:
+            print_table(args.database, args.print_table)
+            return 0
         print(json.dumps(build(args.database), sort_keys=True))
         if args.export:
             export(args.database, args.export)

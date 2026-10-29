@@ -9,8 +9,8 @@ Two loaders write to one SQLite database (`storage/usage.sqlite3` by default):
 
 `build_models.py` then builds the two Part 2 tables from what they loaded.
 
-`run.py` (`up` / `export` / `down`) and the Kubernetes deployment are **not
-implemented yet**. Design decisions are in [NOTES.md](NOTES.md). A visual
+`pipeline.py` runs all three in order. It's what the Kubernetes CronJob runs (see
+[Kubernetes](#kubernetes) below). Design decisions are in [NOTES.md](NOTES.md). A visual
 walkthrough of the loaders and models, with the real numbers, is in
 [docs/ingestion-flow.html](docs/ingestion-flow.html). Open it in a browser.
 
@@ -99,6 +99,45 @@ It rebuilds these in one transaction, so running it again gives identical tables
   known terms.
 - `unattributed_usage_daily`: non-void spend on days when the customer had no
   active contract.
+
+## Kubernetes
+
+You need Docker (running), [kind](https://kind.sigs.k8s.io/) and `kubectl` on PATH.
+`run.py` uses only the Python standard library, so it needs no virtualenv.
+
+```sh
+python run.py up              # cluster "orbital", images, billing API, storage, CronJob
+python run.py export OUT_DIR  # the two Part 2 tables as CSV
+python run.py down            # delete the cluster and everything in it
+```
+
+`up` can be run again at any time. It rebuilds and reloads the images and updates
+every object. It also re-applies the provided API manifest, which resets the API's
+`AS_OF` to its default (2026-09-20). It doesn't start a run. To start one:
+
+```sh
+kubectl -n orbital create job run-1 --from=cronjob/orbital-pipeline
+kubectl -n orbital wait --for=condition=complete job/run-1 --timeout=15m
+kubectl -n orbital logs job/run-1          # one JSON summary per step
+kubectl -n orbital get jobs,pods           # retries show up as extra pods
+```
+
+What runs where:
+
+| Object | Source | Purpose |
+| --- | --- | --- |
+| Deployment and Service `billing-api` | `mock_api/k8s/billing-api.yaml`, unchanged | The mock API |
+| CronJob `orbital-pipeline` | `k8s/pipeline.yaml` | `python pipeline.py`, daily at 03:00 UTC |
+| PVC `orbital-storage` | `k8s/pipeline.yaml` | The SQLite file, at `/var/lib/orbital/usage.sqlite3` |
+| ConfigMap `orbital-pipeline-config` | `k8s/pipeline.yaml` | API URL, database path, lock timeout |
+| Secret `billing-api-credentials` | created by `run.py up` | `BILLING_CLIENT_ID`, `BILLING_CLIENT_SECRET` |
+| ConfigMap `orbital-commitments` | created by `run.py up` from `data/commitments/` | The Finance workbooks, mounted at `/data/commitments` |
+| Pod `orbital-export` | `k8s/export-pod.yaml` | Started and deleted by `run.py export` |
+
+The credentials come from `BILLING_CLIENT_ID` and `BILLING_CLIENT_SECRET` in your
+environment when you run `up`, and fall back to the assignment's demo values. To add a
+new Finance snapshot, put it in `data/commitments/` and run `python run.py up`. No
+image rebuild is needed.
 
 ## Tests
 

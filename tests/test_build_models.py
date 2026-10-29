@@ -5,6 +5,8 @@ import csv
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -126,6 +128,19 @@ class ModelTests(unittest.TestCase):
         with open(self.tmp / 'out' / 'unattributed_usage_daily.csv', newline='') as file:
             self.assertEqual(list(csv.reader(file)),
                              [list(models.UNATTRIBUTED_COLUMNS), ['C2', '2026-01-02', '3']])
+
+    def test_print_matches_export_and_does_not_rebuild(self):
+        self.contract('K-1', 'C1', '2026-01-01', '2026-01-10', '100')
+        self.spend('C1', '2026-01-01', '5')
+        self.spend('C2', '2026-01-01', '3')
+        models.build(self.db)
+        models.export(self.db, self.tmp / 'out')
+        self.spend('C2', '2026-01-02', '7')  # only a rebuild would pick this up
+        for table in models.TABLES:
+            printed = subprocess.run(
+                [sys.executable, 'build_models.py', '--database', str(self.db), '--print', table],
+                cwd=Path(models.__file__).parent, capture_output=True, check=True).stdout
+            self.assertEqual(printed, (self.tmp / 'out' / f'{table}.csv').read_bytes())
 
     def test_no_usage_builds_empty_tables(self):
         self.contract('K-1', 'C1', '2026-01-01', '2026-01-10', '100')
