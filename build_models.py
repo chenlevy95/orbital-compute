@@ -2,7 +2,7 @@
 
 Run it after both loaders:
 
-    python build_models.py [--database PATH]
+    python build_models.py [--database PATH] [--export OUT_DIR]
 
 Inputs (written by the loaders, never changed here):
 
@@ -48,16 +48,19 @@ rounding can never flip it at the 0.9 boundary.
 """
 
 import argparse
+import csv
 from datetime import date, timedelta
 from decimal import Decimal
 import json
 import os
+from pathlib import Path
 import sqlite3
 import sys
 
 import db
 
-# Column order of each table, used for inserts. The names match the assignment exactly.
+# Column order of each table, used for inserts and as the CSV headers that
+# run.py export must produce. The names match the assignment exactly.
 UTILIZATION_COLUMNS = (
     'contract_id', 'customer_id', 'date', 'commitment_usd', 'term_days', 'days_elapsed',
     'consumed_usd', 'consumed_to_date_usd', 'expected_to_date_usd', 'utilization_pct',
@@ -232,16 +235,49 @@ def build(database):
         connection.close()
 
 
+def export(database, out_dir):
+    """Write both tables to OUT_DIR as CSV with a header row, ordered by key.
+
+    The files are OUT_DIR/contract_utilization_daily.csv and
+    OUT_DIR/unattributed_usage_daily.csv, with the column names the assignment
+    gives, as run.py export (Part 3) must produce. Values are written as stored,
+    so amounts keep their exact decimal text. Output is UTF-8 with \\n line endings
+    on every OS, so two exports of the same tables are byte-identical. It reads the
+    last committed tables, so it's safe to run while a build is in progress.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    connection = db.connect(database)
+    try:
+        for table, columns in (('contract_utilization_daily', UTILIZATION_COLUMNS),
+                               ('unattributed_usage_daily', UNATTRIBUTED_COLUMNS)):
+            try:
+                # Both tables are keyed by (first column, date).
+                rows = connection.execute(
+                    f'SELECT {", ".join(columns)} FROM {table} ORDER BY 1, date').fetchall()
+            except sqlite3.OperationalError:
+                raise ModelError(f'{table} missing; run build_models.py first') from None
+            with open(out_dir / f'{table}.csv', 'w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file, lineterminator='\n')
+                writer.writerow(columns)
+                writer.writerows(rows)
+    finally:
+        connection.close()
+
+
 def main():
-    """Rebuild the tables and print the JSON summary.
+    """Rebuild the tables, print the JSON summary, and optionally export CSV.
 
     Exits 0 on success, or 1 with a message on stderr when an input is missing.
     """
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--database', default=os.getenv('USAGE_DATABASE', 'storage/usage.sqlite3'))
+    parser.add_argument('--export', metavar='OUT_DIR', help='also write both tables as CSV')
     args = parser.parse_args()
     try:
         print(json.dumps(build(args.database), sort_keys=True))
+        if args.export:
+            export(args.database, args.export)
         return 0
     except ModelError as exc:
         print(f'Model build failed: {exc}', file=sys.stderr)

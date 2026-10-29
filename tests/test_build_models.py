@@ -1,6 +1,7 @@
 """Run: python -m unittest discover -s tests -v"""
 
 from contextlib import closing
+import csv
 from pathlib import Path
 import shutil
 import sqlite3
@@ -107,7 +108,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual({(row[3], row[4]) for row in rows}, {('80', 4)})
         self.assertEqual(self.table('unattributed_usage_daily'), [])
 
-    def test_rebuild_is_idempotent(self):
+    def test_rebuild_is_idempotent_and_exports_csv(self):
         self.contract('K-1', 'C1', '2026-01-01', '2026-01-10', '100')
         self.spend('C1', '2026-01-02', '4')
         self.spend('C2', '2026-01-02', '3')
@@ -117,6 +118,14 @@ class ModelTests(unittest.TestCase):
         self.assertEqual((self.table('contract_utilization_daily'),
                           self.table('unattributed_usage_daily')), first)
 
+        models.export(self.db, self.tmp / 'out')
+        with open(self.tmp / 'out' / 'contract_utilization_daily.csv', newline='') as file:
+            rows = list(csv.reader(file))
+        self.assertEqual(tuple(rows[0]), models.UTILIZATION_COLUMNS)
+        self.assertEqual(len(rows), 3)
+        with open(self.tmp / 'out' / 'unattributed_usage_daily.csv', newline='') as file:
+            self.assertEqual(list(csv.reader(file)),
+                             [list(models.UNATTRIBUTED_COLUMNS), ['C2', '2026-01-02', '3']])
 
     def test_no_usage_builds_empty_tables(self):
         self.contract('K-1', 'C1', '2026-01-01', '2026-01-10', '100')

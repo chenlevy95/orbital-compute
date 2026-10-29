@@ -10,7 +10,9 @@ Two loaders write to one SQLite database (`storage/usage.sqlite3` by default):
 `build_models.py` then builds the two Part 2 tables from what they loaded.
 
 `run.py` (`up` / `export` / `down`) and the Kubernetes deployment are **not
-implemented yet**. Design decisions are in [NOTES.md](NOTES.md).
+implemented yet**. Design decisions are in [NOTES.md](NOTES.md). A visual
+walkthrough of the loaders and models, with the real numbers, is in
+[docs/ingestion-flow.html](docs/ingestion-flow.html). Open it in a browser.
 
 ## Setup
 
@@ -86,7 +88,8 @@ meaning is confirmed, add it to `KNOWN_STATUSES`.
 Run this after both loaders:
 
 ```sh
-.venv/bin/python build_models.py   # rebuild both tables
+.venv/bin/python build_models.py                  # rebuild both tables
+.venv/bin/python build_models.py --export out/    # also write them as CSV
 ```
 
 It rebuilds these in one transaction, so running it again gives identical tables:
