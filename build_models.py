@@ -24,6 +24,7 @@ Business rules:
 
 - A contract is active on a day when start_date <= day <= end_date. Both dates are
   inclusive. Finance's status column is a hand-typed label and is not used here.
+  ingest_commitments.py warns when it contradicts the dates.
 - The last usage date loaded is MAX(usage_date) over all records, voided ones
   included, because it marks how far the load has reached, not what was spent.
   A contract that starts after that date has no rows yet.

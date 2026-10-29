@@ -83,7 +83,23 @@ first appears, not the date the amendment took effect.
 is cheap at this size, and it means a rerun can't drift from its inputs.
 
 - Whether a contract is active on a day depends only on its dates. Finance's
-  `status` column is a label and isn't used.
+  `status` column is a label and isn't used. So a contract marked Expired or
+  Cancelled whose end date is still in the future keeps being tracked, gets its
+  customer's spend, and can be flagged `at_risk`. The supplied data has no such
+  case. I don't let the label override the dates. An early end needs an actual
+  end date, and guessing one would misattribute spend. I also don't fail the run,
+  because one bad label shouldn't block every contract. Instead:
+  - The commitments loader warns without blocking. It checks each contract's
+    latest version against the last snapshot it appeared in, and flags a status
+    that says the contract is over (Expired, Cancelled, Terminated) while the end
+    date is after that snapshot. It also flags any status not in
+    `KNOWN_STATUSES`, so a new label gets noticed. The warnings go in the run
+    summary under `warnings` and on stderr, and the exit code stays 0.
+  - The warnings repeat on every run until the tracker is fixed. In production
+    they would alert Finance.
+  - Finance fixes the source. They either correct the end date, which the SCD
+    history then records as an amendment and the next rebuild moves later spend
+    to unattributed, or they correct the label.
 - Every day of the term gets a row, including days with no spend
   (`consumed_usd = 0`).
 - "Last usage date loaded" is the latest `usage_date` in `usage`, counting voided

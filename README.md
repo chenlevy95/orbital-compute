@@ -74,6 +74,13 @@ other files still load. Nothing from the skipped file is stored, so to backfill 
 fix it (or add a new header to `ALIASES` in `ingest_commitments.py`) and run the
 loader again. History is rebuilt in date order, so the file lands in the right place.
 
+The summary also lists `warnings`, which don't change the exit code. A warning
+appears when a contract's status says it's over (Expired, Cancelled) but its end
+date is still after the snapshot date, or when the status is a label the loader
+doesn't know. Those contracts are still tracked by their dates. The warning repeats
+on every run until Finance corrects the end date or the status. Once a new label's
+meaning is confirmed, add it to `KNOWN_STATUSES`.
+
 ## Models
 
 Run this after both loaders:

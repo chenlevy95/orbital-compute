@@ -52,7 +52,8 @@ class TrackerTests(unittest.TestCase):
         self.copy('2026-07-31', '2026-08-31', '2026-09-28')
         first = tracker.ingest(self.input, self.db)
         self.assertEqual(first, {'snapshots_added': 3, 'snapshots': 3,
-                                 'history_versions': 16, 'contracts': 11, 'errors': []})
+                                 'history_versions': 16, 'contracts': 11, 'errors': [],
+                                 'warnings': []})
         before = state(self.db)
         self.assertEqual(tracker.ingest(self.input, self.db)['snapshots_added'], 0)
         self.assertEqual(state(self.db), before)
@@ -141,6 +142,27 @@ class TrackerTests(unittest.TestCase):
         write_book(self.input, [ROW, ROW, [None] * 7, ['TOTAL', None, None, None, None, '=SUM(F3:F4)'],
                                 ['* unaudited']])
         self.assertEqual(tracker.ingest(self.input, self.db)['contracts'], 1)
+
+    def test_warns_on_status_that_contradicts_dates_without_blocking(self):
+        ended_early = ['K-2', 'C2', 'Customer', date(2026, 1, 1), date(2026, 12, 31), 100, 'Cancelled']
+        rows = [ROW,  # Active, already past its end date: a stale label, not flagged
+                ['K-3', 'C3', 'Customer', date(2026, 1, 1), date(2026, 6, 30), 100, ' EXPIRED '],
+                ['K-4', 'C4', 'Customer', date(2026, 1, 1), date(2026, 12, 31), 100, 'On Hold'],
+                ended_early]
+        write_book(self.input, rows)
+        result = tracker.ingest(self.input, self.db)
+        self.assertEqual((result['snapshots_added'], result['contracts'], result['errors']), (1, 4, []))
+        self.assertEqual(len(result['warnings']), 2)
+        self.assertIn("K-2: status 'Cancelled' but end date 2026-12-31 is after snapshot 2026-07-31",
+                      result['warnings'][0])
+        self.assertIn("K-4: unknown status 'On Hold'", result['warnings'][1])
+        # Reported on every run until the tracker is fixed.
+        self.assertEqual(tracker.ingest(self.input, self.db)['warnings'], result['warnings'])
+
+        # Finance corrects K-2's end date and K-4's label in the next export.
+        rows[2][-1], rows[3][4] = 'Active', date(2026, 7, 15)
+        write_book(self.input, rows, as_of='2026-08-31')
+        self.assertEqual(tracker.ingest(self.input, self.db)['warnings'], [])
 
 
 if __name__ == '__main__':

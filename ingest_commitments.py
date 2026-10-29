@@ -43,6 +43,12 @@ ALIASES = {
 }
 
 
+# Finance's status labels, normalized like headers. The models go by dates only, so a
+# status only feeds the warnings in status_warnings().
+ENDED_STATUSES = {'expired', 'cancelled', 'canceled', 'terminated'}
+KNOWN_STATUSES = {'active', 'signed', 'at risk'} | ENDED_STATUSES
+
+
 class TrackerError(Exception):
     """A source or business-rule problem, safe to print."""
 
@@ -198,6 +204,28 @@ def rebuild_history(connection):
         check_no_overlap(current, as_of)
 
 
+def status_warnings(connection):
+    """Flag latest versions whose status contradicts the dates or isn't a known label.
+
+    These don't block the run: the dates still decide the models, and Finance fixes
+    the tracker. Each latest version is checked against the last snapshot it was in.
+    """
+    warnings = []
+    for contract_id, status, end_date, last_seen in connection.execute(
+            'SELECT c.contract_id, c.status, c.end_date, MAX(o.as_of) FROM contracts_current c '
+            'JOIN commitment_observations o USING (contract_id) '
+            'GROUP BY c.contract_id ORDER BY c.contract_id'):
+        label = header(status)
+        if label not in KNOWN_STATUSES:
+            warnings.append(f'{contract_id}: unknown status {status!r} in snapshot {last_seen}; '
+                            'confirm its meaning with Finance and add it to KNOWN_STATUSES')
+        elif label in ENDED_STATUSES and end_date > last_seen:
+            warnings.append(f'{contract_id}: status {status!r} but end date {end_date} is after '
+                            f'snapshot {last_seen}; still tracked by its dates until Finance '
+                            'corrects the end date or the status')
+    return warnings
+
+
 def add_snapshot(connection, filename, as_of, checksum, rows):
     """Store a new snapshot's rows; return False if this exact file is already stored."""
     stored = connection.execute('SELECT checksum FROM commitment_snapshots WHERE as_of=?',
@@ -249,7 +277,8 @@ def ingest(input_dir, database):
         count = lambda table: connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]
         result = {'snapshots_added': added, 'snapshots': count('commitment_snapshots'),
                   'history_versions': count('contract_history'),
-                  'contracts': count('contracts_current'), 'errors': errors}
+                  'contracts': count('contracts_current'), 'errors': errors,
+                  'warnings': status_warnings(connection)}
         connection.commit()
         return result
     except BaseException:
@@ -269,6 +298,8 @@ def main():
         print(json.dumps(result, sort_keys=True))
         for error in result['errors']:
             print(f'Skipped: {error}', file=sys.stderr)
+        for warning in result['warnings']:
+            print(f'Warning: {warning}', file=sys.stderr)
         return 1 if result['errors'] else 0
     except TrackerError as exc:
         print(f'Tracker ingestion failed: {exc}', file=sys.stderr)
