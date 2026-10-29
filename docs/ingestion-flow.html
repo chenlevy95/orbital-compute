@@ -27,6 +27,8 @@
   --db-soft: #e3e7f7;
   --bad: #b3261e;
   --bad-soft: #fbe3e1;
+  --k8s: #3f7d3a;        /* the cluster and run.py */
+  --k8s-soft: #e2f0df;
   --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
   --body: "Public Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -36,6 +38,7 @@
     --bg: #11161c; --surface: #19212a; --ink: #e5eaf0; --muted: #98a5b3; --line: #2d3843;
     --usage: #4cc3cc; --usage-soft: #15363a; --tracker: #eba25a; --tracker-soft: #3b2a17;
     --db: #95a6f2; --db-soft: #232b4d; --bad: #f2867e; --bad-soft: #3d1d1b;
+    --k8s: #8fd18a; --k8s-soft: #1c3320;
     color-scheme: dark;
   }
 }
@@ -43,6 +46,7 @@
   --bg: #11161c; --surface: #19212a; --ink: #e5eaf0; --muted: #98a5b3; --line: #2d3843;
   --usage: #4cc3cc; --usage-soft: #15363a; --tracker: #eba25a; --tracker-soft: #3b2a17;
   --db: #95a6f2; --db-soft: #232b4d; --bad: #f2867e; --bad-soft: #3d1d1b;
+  --k8s: #8fd18a; --k8s-soft: #1c3320;
   color-scheme: dark;
 }
 
@@ -75,6 +79,7 @@ section { display: grid; gap: 20px; }
 .tag.tracker { background: var(--tracker-soft); color: var(--tracker); }
 .tag.db { background: var(--db-soft); color: var(--db); }
 .tag.bad { background: var(--bad-soft); color: var(--bad); }
+.tag.k8s { background: var(--k8s-soft); color: var(--k8s); }
 
 .diagram { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
 .diagram svg { display: block; min-width: 700px; width: 100%; height: auto; }
@@ -88,6 +93,8 @@ svg .box.usage { fill: var(--usage-soft); stroke: var(--usage); }
 svg .box.tracker { fill: var(--tracker-soft); stroke: var(--tracker); }
 svg .box.db { fill: var(--db-soft); stroke: var(--db); }
 svg .box.bad { fill: var(--bad-soft); stroke: var(--bad); }
+svg .box.k8s { fill: var(--k8s-soft); stroke: var(--k8s); }
+svg .box.k8s.ghost { fill: none; }
 svg .box.future { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
 svg .arrow { stroke: var(--muted); stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
 svg .arrow.bad { stroke: var(--bad); marker-end: url(#arrow-bad); }
@@ -179,6 +186,34 @@ svg .span { fill: var(--db-soft); stroke: var(--db); stroke-width: 1.2; }
 svg .ondemand { fill: var(--tracker); }
 svg .rowline { stroke: var(--line); stroke-width: 1; }
 
+/* Kubernetes section */
+.glossary td:first-child { font-weight: 600; white-space: nowrap; }
+.decisions td:first-child { font-weight: 600; min-width: 150px; }
+.decisions td { font-size: 0.88rem; }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.step {
+  font: inherit; font-size: 0.85rem; cursor: pointer; text-align: left;
+  padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  display: inline-flex; gap: 8px; align-items: baseline;
+}
+.step b { font-family: var(--mono); color: var(--k8s); }
+.step:hover { border-color: var(--k8s); }
+.step[aria-pressed="true"] { background: var(--k8s-soft); border-color: var(--k8s); }
+.step:focus-visible { outline: 2px solid var(--k8s); outline-offset: 2px; }
+.stepdetail { display: grid; gap: 12px; min-width: 0; }
+.stepdetail .two { gap: 12px; }
+pre.log {
+  margin: 0; padding: 12px 14px; border-radius: 8px; overflow-x: auto;
+  background: var(--bg); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.55; color: var(--ink);
+}
+pre.log .c { color: var(--muted); }
+pre.log .hl { color: var(--k8s); font-weight: 600; }
+.verdict { font-size: 0.92rem; }
+svg .lane-hold { fill: var(--usage); }
+svg .lane-wait { fill: var(--bg); stroke: var(--muted); stroke-dasharray: 4 3; }
+svg .lane-text { font-size: 12px; font-weight: 600; fill: var(--surface); }
+
 ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 65ch; }
 @media (prefers-reduced-motion: no-preference) {
   .scanbar .fill { transition: left .25s ease, width .25s ease; }
@@ -188,9 +223,9 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
 <div class="wrap">
 
 <header style="display:grid; gap:14px">
-  <div class="eyebrow">orbital-compute · ingestion and models</div>
+  <div class="eyebrow">orbital-compute · ingestion, models and the cluster</div>
   <h1>How data gets into the database, and what comes out</h1>
-  <p class="lede">Two loaders, one SQLite file, one model build. <span class="tag usage">ingest_usage.py</span> pulls daily spend from the billing API. <span class="tag tracker">ingest_commitments.py</span> reads Finance's Excel snapshots. <span class="tag db">build_models.py</span> turns both into daily contract utilization and on-demand spend. Each script writes to <span class="tag db">storage/usage.sqlite3</span> in a single transaction.</p>
+  <p class="lede">Two loaders, one SQLite file, one model build. <span class="tag usage">ingest_usage.py</span> pulls daily spend from the billing API. <span class="tag tracker">ingest_commitments.py</span> reads Finance's Excel snapshots. <span class="tag db">build_models.py</span> turns both into daily contract utilization and on-demand spend. Each script writes to one SQLite file in a single transaction. In production all three run once a day as <span class="tag k8s">pipeline.py</span>, a Kubernetes CronJob on a local kind cluster, next to the billing API.</p>
 </header>
 
 <!-- 1. Big picture -->
@@ -198,7 +233,7 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
   <div class="eyebrow">The big picture</div>
   <h2>Sources, loaders, tables, models</h2>
   <div class="diagram">
-    <svg viewBox="0 0 1000 330" role="img" aria-label="Billing API feeds ingest_usage.py which writes usage tables; Excel snapshots feed ingest_commitments.py which writes contract tables; build_models.py reads both and writes contract_utilization_daily and unattributed_usage_daily; run.py and Kubernetes are not built yet.">
+    <svg viewBox="0 0 1000 330" role="img" aria-label="Billing API feeds ingest_usage.py which writes usage tables; Excel snapshots feed ingest_commitments.py which writes contract tables; build_models.py reads both and writes contract_utilization_daily and unattributed_usage_daily; pipeline.py runs all three every day as a Kubernetes CronJob.">
       <defs>
         <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
         <marker id="arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead bad" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -255,10 +290,12 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
       <path class="arrow" d="M700,124 L746,124"/>
       <path class="arrow" d="M816,184 C816,250 760,272 704,272"/>
 
-      <!-- future -->
-      <rect class="box future" x="750" y="234" width="240" height="66" rx="8"/>
-      <text class="label" x="766" y="260">run.py, Kubernetes</text>
-      <text class="badtext" x="766" y="284">Part 3, not built yet</text>
+      <!-- runtime -->
+      <rect class="box k8s" x="750" y="226" width="240" height="88" rx="8"/>
+      <text class="label mono" x="766" y="252">pipeline.py, daily</text>
+      <text class="small" x="766" y="274">runs all three scripts in order</text>
+      <text class="small" x="766" y="292">as a CronJob on kind;</text>
+      <text class="small" x="766" y="308">run.py up / export / down</text>
     </svg>
   </div>
 </section>
@@ -525,7 +562,8 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
       <text class="small" x="664" y="202">on-demand spend</text>
 
       <rect class="box future" x="650" y="224" width="240" height="46" rx="8"/>
-      <text class="small" x="664" y="252">--export OUT_DIR → two CSV files</text>
+      <text class="small" x="664" y="244">--export OUT_DIR → two CSV files</text>
+      <text class="small" x="664" y="262">--print TABLE → stdout (run.py export)</text>
 
       <path class="arrow" marker-end="url(#arrow4)" d="M600,100 L646,76"/>
       <path class="arrow" marker-end="url(#arrow4)" d="M600,200 L646,176"/>
@@ -588,7 +626,171 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
   </div>
 </section>
 
-<!-- 5. Safety -->
+<!-- 5. Kubernetes -->
+<section>
+  <div class="eyebrow"><span class="tag k8s">run.py</span> <span class="tag k8s">k8s/pipeline.yaml</span></div>
+  <h2>Running it on Kubernetes</h2>
+  <p>In the cluster the same three scripts run as one container, <code>python pipeline.py</code>, once a day. Everything lives in a local kind cluster called <code>orbital</code>: the billing API, the database disk and the schedule. The image holds only code. Settings, credentials and the Excel files are handed to the container when it starts.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1000 430" role="img" aria-label="Your laptop runs run.py up, which builds and loads images and applies manifests into the kind cluster. Inside namespace orbital: the billing-api Deployment and Service, the orbital-pipeline CronJob that creates a Job whose pod runs pipeline.py, the settings and credentials it reads, the orbital-storage disk holding usage.sqlite3, and a temporary export pod that run.py export uses to copy both tables back as CSV.">
+      <defs>
+        <marker id="arrow5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <!-- laptop -->
+      <text class="small" x="10" y="16">YOUR LAPTOP</text>
+      <rect class="box" x="10" y="28" width="190" height="104" rx="8"/>
+      <text class="label mono" x="24" y="54">run.py up</text>
+      <text class="small" x="24" y="76">create cluster if missing</text>
+      <text class="small" x="24" y="94">docker build ×2, kind load</text>
+      <text class="small" x="24" y="112">kubectl apply everything</text>
+
+      <rect class="box" x="10" y="176" width="190" height="96" rx="8"/>
+      <text class="label mono" x="24" y="202">kubectl</text>
+      <text class="small" x="24" y="224">create job run-N</text>
+      <text class="small" x="24" y="242">set env AS_OF=…</text>
+      <text class="small" x="24" y="260">(how the grader drives it)</text>
+
+      <rect class="box" x="10" y="318" width="190" height="96" rx="8"/>
+      <text class="label mono" x="24" y="344">run.py export DIR</text>
+      <text class="small" x="24" y="366">DIR/contract_utilization…</text>
+      <text class="small" x="24" y="384">DIR/unattributed_usage…</text>
+      <text class="small" x="24" y="404">copied over kubectl exec</text>
+
+      <!-- cluster -->
+      <rect class="box k8s ghost" x="236" y="8" width="754" height="414" rx="12"/>
+      <text class="head" x="252" y="32">kind cluster "orbital"</text>
+      <text class="small" x="430" y="32">one node, which is one Docker container · namespace orbital</text>
+
+      <rect class="box usage" x="272" y="56" width="210" height="100" rx="8"/>
+      <text class="label mono" x="286" y="82">billing-api</text>
+      <text class="small" x="286" y="104">Deployment + Service, :8765</text>
+      <text class="small" x="286" y="122">provided manifest, unchanged</text>
+      <text class="small" x="286" y="140">AS_OF sets the API's "today"</text>
+
+      <rect class="box k8s" x="526" y="56" width="210" height="76" rx="8"/>
+      <text class="label" x="540" y="82">CronJob</text>
+      <text class="mono small" x="540" y="102">orbital-pipeline</text>
+      <text class="small" x="540" y="122">daily 03:00 UTC, Job template</text>
+
+      <rect class="box k8s" x="526" y="170" width="210" height="122" rx="8"/>
+      <text class="label mono" x="540" y="196">Job run-N → pod</text>
+      <text class="mono small" x="540" y="218">python pipeline.py</text>
+      <text class="small" x="540" y="238">usage → commitments → models</text>
+      <text class="small" x="540" y="258">pod dies → Job starts a new one</text>
+      <text class="small" x="540" y="276">up to 6 retries</text>
+
+      <rect class="box" x="776" y="56" width="198" height="236" rx="8"/>
+      <text class="label" x="790" y="82">Handed in at start</text>
+      <text class="mono small" x="790" y="108">orbital-pipeline-config</text>
+      <text class="small" x="790" y="126">API URL, DB path,</text>
+      <text class="small" x="790" y="142">lock wait 900 s</text>
+      <text class="mono small" x="790" y="172">billing-api-credentials</text>
+      <text class="small" x="790" y="190">Secret: client id + secret</text>
+      <text class="mono small" x="790" y="220">orbital-commitments</text>
+      <text class="small" x="790" y="238">the 3 .xlsx files, mounted</text>
+      <text class="small" x="790" y="254">at /data/commitments</text>
+      <text class="small" x="790" y="278">none of it is in the image</text>
+
+      <rect class="box db" x="526" y="330" width="210" height="76" rx="8"/>
+      <text class="label mono" x="540" y="356">PVC orbital-storage</text>
+      <text class="mono small" x="540" y="376">/var/lib/orbital/</text>
+      <text class="mono small" x="540" y="394">usage.sqlite3 (WAL)</text>
+
+      <rect class="box future" x="272" y="330" width="210" height="76" rx="8"/>
+      <text class="label mono" x="286" y="356">pod orbital-export</text>
+      <text class="small" x="286" y="376">temporary, read-only use</text>
+      <text class="mono small" x="286" y="394">build_models.py --print</text>
+
+      <!-- arrows -->
+      <path class="arrow" marker-end="url(#arrow5)" d="M200,80 L232,80"/>
+      <path class="arrow" marker-end="url(#arrow5)" d="M200,206 L522,206"/>
+      <text class="small" x="300" y="198">creates a Job from the CronJob</text>
+      <path class="arrow" marker-end="url(#arrow5)" d="M200,240 C240,240 250,150 268,140"/>
+      <path class="arrow" marker-end="url(#arrow5)" d="M631,132 L631,166"/>
+      <path class="arrow" marker-end="url(#arrow5)" d="M526,180 L486,150"/>
+      <text class="small" x="286" y="174">the pod calls it: HTTP + OAuth</text>
+      <path class="arrow" marker-end="url(#arrow5)" d="M776,230 L740,230"/>
+      <path class="arrow" marker-start="url(#arrow5)" marker-end="url(#arrow5)" d="M631,296 L631,326"/>
+      <text class="small" x="640" y="316">read + write</text>
+      <path class="arrow" marker-end="url(#arrow5)" d="M522,368 L486,368"/>
+      <path class="arrow" marker-end="url(#arrow5)" d="M268,362 L204,362"/>
+    </svg>
+  </div>
+
+  <div class="two">
+    <div class="panel">
+      <h3>The Kubernetes words used here</h3>
+      <div class="table-scroll">
+      <table class="glossary">
+        <tbody>
+          <tr><td>Image</td><td>A frozen filesystem: Python, the code, the libraries. Built by <code>docker build</code>.</td></tr>
+          <tr><td>kind</td><td>A whole Kubernetes cluster inside one Docker container. <code>kind load</code> copies local images into it, since it can't download them.</td></tr>
+          <tr><td>Pod</td><td>One running container. Disposable: it can be killed at any time and is never repaired, only replaced.</td></tr>
+          <tr><td>Job</td><td>"Run a pod until it succeeds." If the pod dies, the Job starts a fresh one.</td></tr>
+          <tr><td>CronJob</td><td>Creates a Job on a schedule. <code>create job --from=cronjob/…</code> makes one now.</td></tr>
+          <tr><td>Deployment, Service</td><td>Keep a server's pod running, and give it a stable address.</td></tr>
+          <tr><td>PVC</td><td>A disk that outlives pods. The SQLite file lives here.</td></tr>
+          <tr><td>ConfigMap, Secret</td><td>Settings, files and credentials stored in the cluster and handed to pods.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>The three commands</h3>
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">run.py up</td><td>Creates the cluster if needed. Builds and loads both images. Applies the API manifest, which resets <code>AS_OF</code> to 2026-09-20. Creates the Secret and the Excel ConfigMap, then the settings, the disk and the CronJob. Never starts a run, and is safe to repeat.</td></tr>
+          <tr><td class="mono">run.py export DIR</td><td>Starts the temporary export pod with the disk attached, prints each table as CSV through <code>kubectl exec</code>, writes the files, deletes the pod. Reads the last committed tables, even while a run is going.</td></tr>
+          <tr><td class="mono">run.py down</td><td>Deletes the cluster, and the disk with it.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="note">Every <code>kubectl</code> call in <code>run.py</code> names the <code>kind-orbital</code> context, so it can't touch another cluster.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>The grader's sequence, as it ran</h3>
+    <p class="note">These are the real log lines from replaying the grading script on kind. Pick a step.</p>
+    <div class="steps" id="steps" role="group" aria-label="Grading step"></div>
+    <div class="stepdetail" id="step-detail" aria-live="polite"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Two runs started at the same second</h3>
+    <p class="note">Jobs run-7 and run-8, from their timestamped logs. Both pods started at 11:02:30.8. run-8 took the write lock first. run-7's <code>BEGIN IMMEDIATE</code> waited until run-8 committed, then it scanned and found nothing new. The two runs never wrote at the same time.</p>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--usage)"></i>holds the write lock, scanning the API</span>
+      <span><i class="sw" style="background:var(--bg);border:1.5px dashed var(--muted)"></i>waiting for the lock</span>
+    </div>
+    <div class="chart-scroll"><svg id="lanes" viewBox="0 0 680 150" role="img" aria-label="run-8 holds the lock from 30.8 to 33.3 seconds; run-7 waits until 33.3 then holds it until 39.3 seconds"></svg></div>
+  </div>
+
+  <div class="panel">
+    <h3>Design decisions and their trade-offs</h3>
+    <div class="table-scroll">
+    <table class="decisions">
+      <thead><tr><th>Decision</th><th>Why</th><th>Trade-off</th></tr></thead>
+      <tbody>
+        <tr><td>SQLite file on a PVC</td><td>The loaders already run one transaction per step, so a killed pod and two pods at once are handled with no rewrite.</td><td>The disk is one node's folder. On real preemptible nodes it would die with its node, so production would use Postgres or a managed DB on stable nodes.</td></tr>
+        <tr><td>Lock wait of 900 s</td><td>The usage step holds the lock while it calls the slow API, so a run started by hand must be able to wait out a whole run.</td><td>A stuck run makes the next one wait. If the wait times out anyway, that run exits 1 and its Job retries it.</td></tr>
+        <tr><td>One container, three steps</td><td>No orchestration needed. Each step commits on its own, so a kill between steps leaves consistent, slightly stale tables.</td><td>Every step runs even after one fails, so a bad Excel file still lets fresh usage reach the models, but the Job retries pointlessly until the file is fixed.</td></tr>
+        <tr><td>Retries in fresh pods</td><td><code>restartPolicy: Never</code>, <code>backoffLimit: 6</code>. A preempted pod (<code>DisruptionTarget</code>) doesn't use up a retry, and its replacement waits until it has fully stopped.</td><td>Failed pods are kept for their logs, so they pile up until the Job is cleaned up.</td></tr>
+        <tr><td><code>concurrencyPolicy: Forbid</code></td><td>Stops the schedule from starting a run while the last one is still going.</td><td>Runs started by hand bypass it. The database lock is the real guarantee.</td></tr>
+        <tr><td>Settings in a ConfigMap, credentials in a Secret</td><td>The same image runs anywhere. Credentials come from your environment when you run <code>up</code>.</td><td>If those aren't set, <code>run.py</code> falls back to the assignment's published demo values.</td></tr>
+        <tr><td>Excel files in a ConfigMap</td><td>They are data, not code. A new month-end file needs only <code>run.py up</code>, with no image rebuild.</td><td>ConfigMaps hold at most 1 MiB. Three files are about 18 KB, and a real feed would come from object storage.</td></tr>
+        <tr><td>Export through a temporary pod</td><td>Plain stdout over <code>kubectl exec</code> works the same on macOS, Linux and Windows. <code>kubectl cp</code> needs <code>tar</code>.</td><td>Every export waits a few seconds for the pod to start.</td></tr>
+        <tr><td>Locked-down pod</td><td>Non-root user, read-only root filesystem, no capabilities, memory limit.</td><td>A small writable <code>/tmp</code> is mounted for SQLite's temporary files.</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- 6. Safety -->
 <section>
   <div class="eyebrow">Failure and concurrency</div>
   <h2>What happens when things go wrong</h2>
@@ -596,14 +798,18 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
     <table>
       <thead><tr><th>Situation</th><th>What happens</th></tr></thead>
       <tbody>
-        <tr><td>Pod killed mid-run</td><td>The transaction never committed, so SQLite discards it. The next run starts the same scan again.</td></tr>
-        <tr><td>Two runs at the same time</td><td>The second waits on the write lock (up to 60 s), then sees the first run's data and finds nothing new.</td></tr>
+        <tr><td>Pod killed mid-run (preempted node, <code>kubectl delete pod</code>)</td><td>The transaction never committed, so SQLite discards it. The Job notices the pod is gone and starts a fresh one, which runs the same scan again. A preempted pod doesn't count against the 6 retries.</td></tr>
+        <tr><td>Two runs at the same time (a scheduled run plus one started by hand)</td><td>The second waits on the write lock, up to 900 s in the cluster (60 s locally), then sees the first run's data and finds nothing new. If the wait times out, it exits 1 and its Job retries.</td></tr>
         <tr><td>API returns 429 or 503</td><td>Up to 6 attempts with growing, jittered waits, at least as long as <code>Retry-After</code>.</td></tr>
         <tr><td>Token expires</td><td>Refreshed 5 s before expiry, and once more after a 401.</td></tr>
-        <tr><td>Finance renames a column</td><td>That file is skipped and the error names the missing header. The other files still load. Confirm the meaning, add it to <code>ALIASES</code>, and rerun to backfill it.</td></tr>
+        <tr><td>Finance renames a mandatory column</td><td>That file is skipped and the error names the missing header. The other files still load. Confirm the meaning, add it to <code>ALIASES</code>, and rerun to backfill it.</td></tr>
+        <tr><td>Customer name or status is missing or empty</td><td>The file still loads with those values stored as NULL, and the run warns once. A missing value doesn't count as an amendment in the history.</td></tr>
         <tr><td>Finance sends a broken file, then a fixed one</td><td>The broken file is skipped and never stored. The fixed file, under the same date, loads on the next run, and the history rebuild puts it in date order.</td></tr>
         <tr><td>A status contradicts the dates</td><td>The loader prints a warning on every run and still loads the file. The models keep going by the dates.</td></tr>
         <tr><td>A record arrives more than 30 days late</td><td>Outside the overlap, so it's missed until someone runs <code>--reconcile</code>. Measured: none did.</td></tr>
+        <tr><td>Killed between steps</td><td>The finished steps are committed, so the tables are consistent but one step behind. The retry or the next run catches up.</td></tr>
+        <tr><td>A step fails, for example a bad Excel file</td><td>The later steps still run, so fresh usage still reaches the models. The pod exits 1, so the Job is marked failed and retried.</td></tr>
+        <tr><td>The billing API pod restarts (AS_OF changed)</td><td>The client retries connection errors with backoff. If the API stays down, the run fails, rolls back and is retried.</td></tr>
         <tr><td>Model build killed, or run twice at once</td><td>Rolled back, or queued on the lock. Readers see the old tables or the new ones, never a mix.</td></tr>
       </tbody>
     </table>
@@ -884,6 +1090,71 @@ ul.plain { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 6
     const total = days.reduce((s, [, a]) => s + a, 0);
     el('text', { class: 'tick', x: TW - R + 10, y: mid + 4, style: total ? 'fill:var(--ink);font-weight:600' : '' }, tl, total ? usd(total, 0) + ` · ${days.length} days` : '—');
   });
+
+  // ---- Grading sequence (real log lines from the replay on kind) ----
+  const STEPS = [
+    { title: 'Backfill, pod killed',
+      cmds: ['python run.py up', 'kubectl -n orbital create job run-1 --from=cronjob/orbital-pipeline', '# a few seconds later, while usage is loading:', 'kubectl -n orbital delete pod -l job-name=run-1'],
+      what: 'The first pod dies mid-scan, before its usage transaction commits, so nothing of it is stored. The Job sees its pod gone and starts run-1-n2dpm, which scans everything from the start.',
+      log: ['== usage', '{"mode": "<b>full</b>", "start_date": "2026-01-01", "end_date": "2026-10-29", "inserted": <b>5373</b>, "updated": 0, "unchanged": 0}', '== commitments', '{"snapshots_added": 3, "snapshots": 3, "history_versions": 16, "contracts": 11, "errors": [], "warnings": []}', '== models', '{"last_usage_date": "2026-09-19", "contract_days": 1619, "unattributed_days": 173, "at_risk_contracts": 4}', '== done, exit 0'],
+      verdict: 'A clean full load, as if the first pod had never started. These are the tables shown in the Models section above.' },
+    { title: 'Move "today", incremental run',
+      cmds: ['kubectl -n orbital set env deployment/billing-api AS_OF=2026-09-28', 'kubectl -n orbital rollout status deployment/billing-api', 'kubectl -n orbital create job run-2 --from=cronjob/orbital-pipeline', 'python run.py export A'],
+      what: 'The API now shows 8 more days. The scan starts 30 days before the last stored date, so it picks up the new days and restatements in the overlap. That includes C008\'s Sep 18 usage, which arrived 8 days late.',
+      log: ['== usage', '{"mode": "<b>incremental</b>", "start_date": "2026-08-20", "end_date": "2026-10-29", "inserted": <b>243</b>, "updated": <b>24</b>, "unchanged": 903}', '== commitments', '{"snapshots_added": 0, ...}', '== models', '{"last_usage_date": "<b>2026-09-27</b>", "contract_days": 1691, "unattributed_days": 181, "at_risk_contracts": 4}', '== done, exit 0'],
+      verdict: 'Export A, the reference: 1,691 utilization rows and 181 on-demand rows.' },
+    { title: 'Same again',
+      cmds: ['kubectl -n orbital create job run-3 --from=cronjob/orbital-pipeline', 'python run.py export B', 'diff -r A B'],
+      what: 'Every record in the 30-day overlap is already stored with the same updated_at, so nothing changes. The model build rebuilds identical rows.',
+      log: ['== usage', '{"mode": "incremental", "start_date": "2026-08-28", "end_date": "2026-10-29", "inserted": <b>0</b>, "updated": <b>0</b>, "unchanged": 930}'],
+      verdict: 'B is byte-identical to A.' },
+    { title: 'Two runs at once',
+      cmds: ['kubectl -n orbital create job run-4 --from=cronjob/orbital-pipeline; kubectl -n orbital create job run-5 --from=cronjob/orbital-pipeline', 'python run.py export C', 'diff -r A C'],
+      what: 'Both pods start together. One takes the write lock. The other waits on BEGIN IMMEDIATE, then sees everything already stored. The timeline below shows the same thing with timestamps.',
+      log: ['-- run-4', '== usage', '{"mode": "incremental", "inserted": 0, "updated": 0, "unchanged": 930}', '-- run-5', '== usage', '{"mode": "incremental", "inserted": 0, "updated": 0, "unchanged": 930}'],
+      verdict: 'C is byte-identical to A. Nothing was double-counted.' },
+    { title: 'Full reload',
+      cmds: ['python run.py down', 'python run.py up', 'kubectl -n orbital set env deployment/billing-api AS_OF=2026-09-28', 'kubectl -n orbital create job run-6 --from=cronjob/orbital-pipeline', 'python run.py export D', 'diff -r A D'],
+      what: 'A fresh cluster with an empty disk loads everything in one go at the later date.',
+      log: ['== usage', '{"mode": "<b>full</b>", "start_date": "2026-01-01", "end_date": "2026-10-29", "inserted": <b>5616</b>, "updated": 0, "unchanged": 0}'],
+      verdict: 'D is byte-identical to A. 5,373 + 243 = 5,616: the step-by-step history and the one-shot load end up with exactly the same records.' },
+  ];
+  const stepsEl = $('steps');
+  stepsEl.innerHTML = STEPS.map((st, i) => `<button type="button" class="step" data-i="${i}" aria-pressed="false"><b>${i + 1}</b>${st.title}</button>`).join('');
+  const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  function showStep(i) {
+    stepsEl.querySelectorAll('.step').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.i) === i)));
+    const st = STEPS[i];
+    const cmds = st.cmds.map(c => c.startsWith('#') ? `<span class="c">${esc(c)}</span>` : esc(c)).join('\n');
+    const log = st.log.map(l => esc(l).replace(/&lt;b>/g, '<span class="hl">').replace(/&lt;\/b>/g, '</span>')).join('\n');
+    $('step-detail').innerHTML = `
+      <p>${st.what}</p>
+      <div class="two">
+        <div style="display:grid;gap:6px;min-width:0"><span class="eyebrow">You run</span><pre class="log">${cmds}</pre></div>
+        <div style="display:grid;gap:6px;min-width:0"><span class="eyebrow">kubectl logs</span><pre class="log">${log}</pre></div>
+      </div>
+      <p class="verdict"><span class="tag k8s">result</span> ${st.verdict}</p>`;
+  }
+  stepsEl.addEventListener('click', e => { const b = e.target.closest('.step'); if (b) showStep(Number(b.dataset.i)); });
+  showStep(0);
+
+  // ---- Concurrency lanes (run-7 / run-8 timestamps, seconds after 11:02) ----
+  const lanes = $('lanes');
+  const T0 = 30.5, T1 = 40, LX = 70, LW = 590;
+  const lx = t => LX + (t - T0) / (T1 - T0) * LW;
+  for (let t = 31; t <= 39; t += 2) {
+    el('line', { class: 'grid', x1: lx(t), x2: lx(t), y1: 14, y2: 118 }, lanes);
+    el('text', { class: 'tick', x: lx(t), y: 136, 'text-anchor': 'middle' }, lanes, `11:02:${t}`);
+  }
+  const lane = (y, name, parts) => {
+    el('text', { class: 'tick', x: 4, y: y + 22, style: 'fill:var(--ink);font-weight:600' }, lanes, name);
+    parts.forEach(([a, b, kind, label]) => {
+      el('rect', { class: kind === 'hold' ? 'lane-hold' : 'lane-wait', x: lx(a), y, width: lx(b) - lx(a), height: 34, rx: 4 }, lanes);
+      if (label) el('text', { class: kind === 'hold' ? 'lane-text' : 'tick', x: lx(a) + 8, y: y + 21 }, lanes, label);
+    });
+  };
+  lane(18, 'run-8', [[30.78, 33.26, 'hold', 'scan, commit']]);
+  lane(70, 'run-7', [[30.78, 33.26, 'wait', 'waits'], [33.26, 39.25, 'hold', 'scan: 0 new, 930 unchanged, commit']]);
 })();
 </script>
 
