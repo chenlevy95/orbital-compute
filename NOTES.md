@@ -1,169 +1,131 @@
-# Design decisions and tradeoffs
+# Design decisions and trade-offs
 
-## Ingestion and completeness
+## Usage ingestion
 
-The first load scans from `2026-01-01` through the current UTC date. Requests use
-inclusive windows of at most 31 days and pages of 200 records. Subsequent runs
-start 30 days before the maximum stored usage date. Anchoring the overlap to
-received data, rather than the machine clock, handles the mock API's earlier
-simulated date. Empty responses never advance the received-data watermark.
+The first run scans from 2026-01-01 through today (UTC), in windows of at most
+31 days and pages of 200 records. Later runs start 30 days before the latest usage
+date already stored. The overlap is anchored to stored data rather than the clock
+because the API's simulated "today" lags the real one. The overlap covers
+restatements (documented as up to 30 days) and late first arrivals.
+`--reconcile` rescans all history.
 
-We assume first arrivals are no more than **30 days after the usage date**.
-This is our implementation assumption, not a vendor guarantee: the assignment
-bounds restatements to 30 days but gives no maximum first-arrival delay. To start
-simple and avoid unnecessary API requests and compute, there is **no automatic
-weekly reconciliation**. After backfill, normal runs use the 30-day overlap;
-`--reconcile` remains available for a manual full-history refresh. The stored
-`last_full_scan` marks a committed full scan; its age does not trigger work.
+**Assumption:** a record first arrives no more than 30 days after its usage date.
+The vendor doesn't guarantee this, so I measured it through the API at a simulated
+date of 2026-10-26. That covered all 5,616 record IDs for usage dates 2026-01-01
+to 2026-09-27:
 
-Black-box measurements at simulated API date **2026-10-26** covered all **5,616**
-visible record IDs, with usage dates **2026-01-01 through 2026-09-27**:
+- 99.95% of records arrived within one day.
+- Three records arrived 8 days late: C008's usage on 2026-09-18.
+- No record arrived more than 30 days late.
 
-| First-arrival delay | Records | Percentage |
-| --- | ---: | ---: |
-| 0–1 days | 5,613 | 99.95% |
-| 2–7 days | 0 | 0% |
-| 8–30 days | 3 | 0.05% |
-| 31–60 days | 0 | 0% |
-| More than 60 days | 0 | 0% |
+A record that arrives later than the overlap stays missing until someone runs
+`--reconcile`.
 
-We queried isolated, unchanged API instances at usage date +1, +7, +30, and +60
-days (capped at the observation date), stopping once each ID appeared. This
-measures visibility through the documented HTTP interface, not
-`updated_at - usage_date`, which would mix first arrivals with restatements.
-The three late records were C008's September 18 H100, H200, and SSD usage:
-absent September 25, present September 26, **eight days late**, with current
-amounts totaling **$10,775.44**. No source implementation or backing data was read.
+Records are keyed by `record_id`. A version replaces the stored one only if its
+`updated_at` is newer, so replays and older versions change nothing. If the same
+`updated_at` comes with different contents, the run fails. Voided records are
+kept, and the `non_void_usage` view leaves them out. `updated_at` must match the
+observed `YYYY-MM-DDTHH:MM:SSZ` format exactly, so that comparing the strings
+compares the times. Amounts are stored as exact decimal text.
 
-The 30-day overlap covers every measured arrival, so this dataset provides no
-evidence that weekly full scans are currently needed. It does not prove a future
-lateness bound or include records not yet visible at the observation cutoff.
-If the assumption is violated, records outside the overlap can remain missing
-until a manual `--reconcile`; incremental and fresh loads may then differ.
+For HTTP, the client retries connection errors, 429 and 5xx up to 6 times with
+jittered backoff, and honors `Retry-After`. It refreshes the token before it
+expires, and once more after a 401.
 
-## Storage, consistency, and reliability
+## Commitments ingestion
 
-SQLite provides portable storage without a database service. Each run acquires a
-write lock before fetching and commits usage and reconciliation state in one
-transaction. A crash rolls back the run; overlapping writers serialize or fail
-after a bounded lock wait. WAL allows readers to see the previous committed data.
-This is simple and atomic, but holds a writer lock during HTTP waits and repeats
-all fetching after interruption. Durable staging and checkpoints would improve
-recovery for larger loads. PostgreSQL would support workers across multiple hosts.
+Every workbook is parsed and validated before the database is touched. The header
+row is found by looking in every sheet for a single row that names all seven
+fields. Each field name goes through an explicit alias table, so the parser copes
+with renamed sheets, title rows above the table, reordered columns and the two
+commitment header names. The parser also handles these:
 
-Records are keyed by `record_id`; only a newer UTC `updated_at` replaces
-a stored version. Identical duplicates and older versions do nothing. Equal
-timestamps with different values fail the run. Void records remain stored and are
-excluded by `non_void_usage`; absence from a response never implies deletion.
-Amounts and quantities use canonical decimal text to preserve precision. This
-requires explicit decimal arithmetic downstream. Idempotency applies to usage
-and derived results; operational logs and full-scan timestamps can change.
+- IDs with stray spaces are trimmed.
+- Dates can be Excel dates, `YYYY-MM-DD` or `1 Jun 2026`.
+- Amounts like `$900,000.00` are parsed.
+- Blank rows, the TOTAL row and `*` footnotes are skipped.
+- Exact duplicate rows collapse into one.
 
-The raw `updated_at` values in all 5,373 records returned at API as-of
-`2026-09-20` already used `YYYY-MM-DDTHH:MM:SSZ`. We therefore validate that exact
-format and calendar validity, then store the original string without timezone
-conversion. Fixed-width UTC strings support chronological comparison directly.
-This is an observed source-format assumption, not a documented guarantee for all
-future responses: offsets, fractional seconds, or other format changes fail the
-run and require review. Existing timestamps written by the earlier loader as
-`.000000+00:00` are converted back to `Z` inside the next successful ingestion
-transaction, avoiding mixed-format comparisons when reusing an existing database.
+Anything else makes the loader skip that file. That includes a missing or ambiguous
+header, a bad value, conflicting duplicates, an end date before the start date,
+overlapping contracts for one customer, and changed bytes for a date that was
+already loaded. I chose to reject the file instead of guessing: a misread amount
+column would silently corrupt every utilization number. Each file loads inside its
+own savepoint, so a file that fails a check against stored data is undone on its
+own. The other files still load, and the run exits 1 with the errors, so the job
+keeps failing until someone fixes the file.
 
-A reused HTTP session, proactive token refresh, one refresh after `401`, timeouts,
-and bounded retries handle transient failures. Backoff includes jitter and honors
-`Retry-After`; an excessive delay fails the run instead of retrying prematurely.
-Requests are sequential to limit rate pressure. The API offers no documented
-snapshot-consistent pagination, so a changing source cannot be read as a guaranteed
-single point-in-time snapshot; overlap revisits recent differences, and manual
-reconciliation can repair older omissions.
+Trade-off: the checks that need stored data run by writing first. The changed-bytes
+check and the overlap check both work this way, and a rejected file is undone with
+`ROLLBACK TO` the savepoint. That rollback only happens on rejection, and it is cheap
+because nothing has been committed, so readers never see the rejected rows. The
+bigger cost is on the happy path. History is deleted and replayed after every new
+file, so a first run with three files rebuilds it three times. At a few dozen rows
+this takes milliseconds, so I kept the simpler code.
 
-## Validation and deliberate omissions
+A skipped file is never stored. Once Finance sends a fixed file under the same date,
+or a new alias is added, the next normal run loads it. History is rebuilt in date
+order, so no separate backfill step is needed. The side effect is that a late middle
+snapshot can move later versions' `observed_from` dates. For example, if August were
+skipped, K-1009's amendment would first show as observed on Sep 28, then move to
+Aug 31 once August loads.
 
-Validation uses explicit Python checks rather than Pydantic because there is one
-small record schema and keeping dependencies minimal makes the validation rules
-easy to inspect. Pydantic would offer declarative models and structured field
-errors, especially useful if more schemas are added. It would still require
-explicit rules for the exact timestamp spelling, decimal precision, and whether
-a usage date belongs to the requested window. The tradeoff is more handwritten
-validation and less detailed errors in the current implementation.
+New snapshots are stored as observations. History is then rebuilt from all
+observations in date order, so files can arrive in any order. A contract that
+Finance removes from a later snapshot keeps its last version open in
+`contracts_current`. `observed_from` is the date of the snapshot where a version
+first appears, not the date the amendment took effect.
 
-Malformed pages, pagination cycles, invalid required fields, out-of-window dates,
-nonfinite numbers, unknown statuses, and conflicting versions block publication.
-Negative amounts are valid. Extra fields are ignored. Tests cover HTTP failures,
-late arrivals, corrections, voids, exact decimals, reruns, reconciliation, killed
-writers, and concurrent processes. A black-box smoke test compares incremental,
-reconciled, and fresh loads without inspecting or modifying the API implementation.
+## Concurrency and recovery
 
-The implemented scope is usage ingestion and contract snapshot history. Financial models,
-CSV model exports, `run.py`, pipeline containers, and Kubernetes deployment are
-not implemented. The provided `mock_api/` and `data/` remain unchanged. Historical
-usage versions, durable checkpoints, central monitoring, and distributed execution
-are also deliberately omitted to keep this stage small and understandable.
+Both loaders use SQLite in WAL mode. Each run is a single `BEGIN IMMEDIATE`
+transaction:
 
-For production, use persistent managed storage, a secret store, and Airflow or an
-equivalent scheduler with daily runs, delayed retries, and explicit backfill and
-reprocessing jobs. Measure first-arrival delays and revisit the overlap or add
-scheduled reconciliation if evidence warrants it. Alert on failed or missing runs
-and stale data; validate changes in CI before deployment. On spot nodes, durable
-staging and atomic publication would avoid refetching entire interrupted runs. For
-Finance exports, monitor file delivery as well as successful ingestion; alert on
-layout failures and unusual row-count changes. Review new aliases with Finance
-and add fixture coverage before deploying parser changes.
+- A killed run rolls back.
+- Concurrent runs queue for the write lock instead of interleaving.
+- Readers keep seeing the last committed state.
 
-## Contract snapshots and history
+The cost is that the write lock is held while waiting on HTTP, and an interrupted
+run starts its scan from the beginning. At this data size that's fine.
 
-`ingest_commitments.py` uses openpyxl and the same local SQLite database. Raw
-archival commits before validation: `commitment_files` retains each received
-filename/checksum, original bytes, processing state, and diagnostics, even when
-the file is incomplete. Validated `commitment_snapshots` reference that evidence;
-observations preserve extra columns and duplicate row references. SCD Type 2
-history versions contract terms and supplied descriptive changes. Observation
-dates come from filenames, not legal amendment dates. Disappearance never deletes
-a contract or closes its last known version.
+## Left out on purpose
 
-Header discovery uses essential fields and explicit aliases, handling supplied
-sheet/column changes without fuzzy guesses. IDs, dates, and amount are essential;
-missing values quarantine the whole snapshot. Customer name and status are
-descriptive: absent columns are recorded in `missing_fields_json`, and history
-retains their last known values (or NULL on first observation). Present empty
-cells explicitly set NULL. This preserves the distinction between unavailable
-metadata and an actual supplied change. Essential terms are never filled from
-previous exports, which could invent an unconfirmed combination of amount/dates.
+- I didn't build the Part 2 models, `run.py` or the Kubernetes deployment.
+- Workbooks and rejection reasons are not stored in the database. Errors go to the
+  run's output, and the source files remain the evidence.
+- Replacing a snapshot that was already loaded isn't supported. A changed file for
+  a stored date is rejected.
+- Extra workbook columns (owner, region, notes) aren't stored.
+- No PostgreSQL, durable staging or checkpoints. SQLite is enough for one writer.
 
-Bad layouts, malformed tracked values, conflicting duplicates, formulas in
-tracked fields, and overlapping terms quarantine a snapshot without publishing
-partial rows. Valid files can proceed independently. Exact duplicates produce
-warnings; money and dates use explicit, locale-independent normalization. Fuzzy
-matching is deliberately excluded from automatic acceptance: similar words do
-not prove identical financial meaning. Suggested aliases could improve future
-diagnostics, but would still need human review before publication.
+## Next steps
 
-Archival identity is filename plus checksum; publication identity remains snapshot
-date. A corrected quarantined file may publish for an unpublished date, retaining
-earlier rejected bytes as superseded evidence. A different file for an already
-published date is quarantined rather than rewriting history. Matching accepted or
-rejected replays do not change persisted state. Pending archives resume after a
-crash; `--reprocess` explicitly retries quarantines from stored bytes after a parser
-fix, even when the original file is gone. Nonzero exits and structured findings
-make unresolved quarantine visible; current terms remain usable but can be stale.
+- Build the Part 2 models, `run.py` and the Kubernetes CronJob.
+- Validate commitment snapshots in memory, then write once. Read the stored
+  observations, add each new file in memory, and rebuild history with a pure function
+  that returns rows instead of writing them. Drop any file that fails a check, then
+  write the accepted snapshots and replace `contract_history` once per run. That
+  removes the savepoints, the write-then-undo, and the repeated rebuilds. It also
+  makes the history logic testable without a database. At much larger sizes, update
+  history incrementally in SQL instead of keeping observations in memory.
 
-Each publication candidate rebuilds history in date order and validates every
-published state, including later dates affected by an older arrival. A failed
-candidate rolls back without affecting accepted history or its archived evidence.
-This is simpler than incremental interval surgery, at greater CPU cost per batch.
-Archiving first adds states and storage, but one bad file no longer blocks unrelated
-valid snapshots. SQLite avoids another service; PostgreSQL suits distributed
-workers. Older tracker schemas migrate transactionally, preserving bytes, history,
-and usage records. Both ingestion commands commit independently; combined model
-publication is deferred along with the models.
+## Production
 
-Verification includes the supplied exports, replay equality, fresh/incremental and
-reverse-order loads, vanished contracts, rollback, killed writers, concurrency,
-optional columns, archive recovery, reprocessing, and migration. The supplied
-complete exports retain their expected 3 snapshots, 29 observations, 16 versions,
-and 11 contracts. Production monitoring must compare archive receipt with latest
-published dates and alert on unresolved quarantine. Replacing published historical
-terms requires a separate reviewed correction workflow, still deferred.
+- **Scheduling:** run the jobs from Airflow (or a similar orchestrator) every day,
+  with retries after a delay. Make backfills and full reconciliations explicit,
+  parameterized jobs.
+- **Storage and secrets:** use a managed database and a secret store. On spot
+  nodes, stage data durably and publish it atomically, so an interrupted run
+  doesn't have to fetch everything again.
+- **Alerting:** alert on failed or missing runs, stale data, and a Finance export
+  that didn't arrive.
+- **CI:** run the tests and the smoke check before every deploy.
+- **Layout changes:** when Finance changes the workbook layout, the run fails and
+  names the file and the missing header. Someone confirms the meaning with Finance,
+  adds an alias and a test, and the next run loads the file.
 
-AI assistance was used to implement the loader, tests, and documentation. Verification
-included deterministic tests and live requests to the unchanged mock API.
+## AI usage
+
+I used AI assistants to write and later simplify the loaders, the tests and this
+documentation. I verified the results with the unit tests and with live runs
+against the unchanged mock API.
