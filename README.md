@@ -9,10 +9,13 @@ Two loaders write to one SQLite database (`storage/usage.sqlite3` by default):
 
 `build_models.py` then builds the two Part 2 tables from what they loaded.
 
-`pipeline.py` runs all three in order. It's what the Kubernetes CronJob runs (see
-[Kubernetes](#kubernetes) below). Design decisions are in [NOTES.md](NOTES.md). A visual
-walkthrough of the loaders and models, with the real numbers, is in
-[docs/ingestion-flow.html](docs/ingestion-flow.html). Open it in a browser.
+`pipeline.py` runs all three in order and is what the Kubernetes CronJob runs (see
+[Kubernetes](#kubernetes)). Every step runs even if an earlier one fails, and the exit
+code is the worst of the three.
+
+Design decisions are in [NOTES.md](NOTES.md). For a visual walkthrough of the loaders
+and models with the real numbers, open
+[docs/ingestion-flow.html](docs/ingestion-flow.html) in a browser.
 
 ## Setup
 
@@ -25,6 +28,20 @@ python3 -m venv .venv
 
 On Windows use `py -3 -m venv .venv` and `.venv\Scripts\python.exe` instead.
 
+All scripts read their settings from the environment, and the loaders and
+`build_models.py` also take the matching flag:
+
+| Setting | Default | Environment / flag |
+| --- | --- | --- |
+| API URL | `http://127.0.0.1:8765` | `BILLING_API_URL` / `--api-url` |
+| Credentials | required | `BILLING_CLIENT_ID`, `BILLING_CLIENT_SECRET` |
+| Database | `storage/usage.sqlite3` | `USAGE_DATABASE` / `--database` |
+| Finance workbooks | `data/commitments` | `COMMITMENTS_DIR` / `--input-dir` |
+| SQLite lock wait | 60 seconds | `DB_LOCK_TIMEOUT_SECONDS` |
+
+To run everything locally in one go, start the mock API (below) and run
+`.venv/bin/python pipeline.py`.
+
 ## Usage loader
 
 Start the mock API in a separate terminal and leave it running:
@@ -33,7 +50,7 @@ Start the mock API in a separate terminal and leave it running:
 python3 mock_api/server.py --as-of 2026-09-20
 ```
 
-Then run the loader:
+Then, in another terminal, run the loader:
 
 ```sh
 export BILLING_CLIENT_ID=candidate BILLING_CLIENT_SECRET=orbital-s3cret
@@ -42,11 +59,9 @@ export BILLING_CLIENT_ID=candidate BILLING_CLIENT_SECRET=orbital-s3cret
 .venv/bin/python ingest_usage.py --reconcile  # rescan all history
 ```
 
-| Setting | Default | Override |
-| --- | --- | --- |
-| API URL | `http://127.0.0.1:8765` | `BILLING_API_URL` or `--api-url` |
-| Database | `storage/usage.sqlite3` | `USAGE_DATABASE` or `--database` |
-| Credentials | required | `BILLING_CLIENT_ID`, `BILLING_CLIENT_SECRET` |
+The backfill starts at 2026-01-01 and requests at most 31 days per call. An
+incremental run starts 30 days before the latest usage date already stored, so late
+corrections and voids are picked up.
 
 Each run prints a JSON summary and exits 0, or exits 1 with an error message.
 It creates these:
@@ -59,7 +74,7 @@ Amounts are stored as exact decimal text.
 ## Commitments loader
 
 ```sh
-.venv/bin/python ingest_commitments.py   # reads data/commitments/, or pass --input-dir
+.venv/bin/python ingest_commitments.py   # reads data/commitments/
 ```
 
 With the supplied files it stores 3 snapshots, 16 history versions and 11 contracts.
@@ -83,6 +98,12 @@ doesn't know. Those contracts are still tracked by their dates. The warning repe
 on every run until Finance corrects the end date or the status. Once a new label's
 meaning is confirmed, add it to `KNOWN_STATUSES`.
 
+Customer name and status are descriptive: the models don't use them. If a workbook
+lacks either column, or a row leaves one empty, the file still loads with that value
+stored as NULL. The run warns once, when that snapshot loads. A missing value doesn't
+count as an amendment in the history. The other five fields are mandatory, and a
+missing column or empty cell in any of them skips the file.
+
 ## Models
 
 Run this after both loaders:
@@ -90,6 +111,7 @@ Run this after both loaders:
 ```sh
 .venv/bin/python build_models.py                  # rebuild both tables
 .venv/bin/python build_models.py --export out/    # also write them as CSV
+.venv/bin/python build_models.py --print unattributed_usage_daily  # print one table, no rebuild
 ```
 
 It rebuilds these in one transaction, so running it again gives identical tables:
@@ -103,7 +125,9 @@ It rebuilds these in one transaction, so running it again gives identical tables
 ## Kubernetes
 
 You need Docker (running), [kind](https://kind.sigs.k8s.io/) and `kubectl` on PATH.
-`run.py` uses only the Python standard library, so it needs no virtualenv.
+`run.py` uses only the Python standard library, so it needs no virtualenv. Every
+`kubectl` call it makes targets the `kind-orbital` context, so it never touches another
+cluster.
 
 ```sh
 python run.py up              # cluster "orbital", images, billing API, storage, CronJob
@@ -121,6 +145,19 @@ kubectl -n orbital wait --for=condition=complete job/run-1 --timeout=15m
 kubectl -n orbital logs job/run-1          # one JSON summary per step
 kubectl -n orbital get jobs,pods           # retries show up as extra pods
 ```
+
+To move the API's "today" forward and pick up the newer data, change `AS_OF` and start
+another run:
+
+```sh
+kubectl -n orbital set env deployment/billing-api AS_OF=2026-09-28
+kubectl -n orbital rollout status deployment/billing-api
+kubectl -n orbital create job run-2 --from=cronjob/orbital-pipeline
+```
+
+The CronJob never runs two jobs at once (`concurrencyPolicy: Forbid`) and retries a
+failed run up to 6 times. A run started by hand while another is in progress waits up
+to 15 minutes for the database lock.
 
 What runs where:
 
@@ -144,4 +181,13 @@ image rebuild is needed.
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python tests/smoke_api.py   # needs the mock API and credentials
+```
+
+`tests/test_regression.py` runs the whole pipeline on the real inputs: the mock API's
+data at as-of 2026-09-20, served in memory, plus the workbooks in `data/commitments/`.
+It compares both CSVs line by line with `tests/golden/`. After an intended change to
+the results, review the diff and regenerate them:
+
+```sh
+UPDATE_GOLDEN=1 .venv/bin/python -m unittest discover -s tests -p test_regression.py
 ```

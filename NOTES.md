@@ -1,236 +1,192 @@
-# Design decisions and trade-offs
+# Notes
 
-## Usage ingestion
+**Guiding principle:** keep it small and explainable, but never trade away financial
+correctness, history, or safe reruns.
 
-The first run scans from 2026-01-01 through today (UTC), in windows of at most
-31 days and pages of 200 records. Later runs start 30 days before the latest usage
-date already stored. The overlap is anchored to stored data rather than the clock
-because the API's simulated "today" lags the real one. The overlap covers
-restatements (documented as up to 30 days) and late first arrivals.
-`--reconcile` rescans all history.
+## 1. Design decisions and trade-offs
 
-**Assumption:** a record first arrives no more than 30 days after its usage date.
-The vendor doesn't guarantee this, so I measured it through the API at a simulated
-date of 2026-10-26. That covered all 5,616 record IDs for usage dates 2026-01-01
-to 2026-09-27:
+### Usage ingestion
 
-- 99.95% of records arrived within one day.
-- Three records arrived 8 days late: C008's usage on 2026-09-18.
-- No record arrived more than 30 days late.
+- **Scan window: a 30-day overlap**
+  - *Choice:* each run rescans from 30 days before the latest stored `usage_date`
+    through today (UTC). `--reconcile` rescans from 2026-01-01.
+  - *Why:* the API restates records for up to 30 days. 
+    The window counts back from the newest stored usage date rather than the system clock, 
+    because the API’s simulated date can be weeks behind the real one.
+  - *Trade-off:* this assumes a record first arrives within 30 days. I measured it:
+    of 5,616 records, 99.95% arrived within a day, 3 arrived 8 days late, and none
+    arrived later. Anything older stays missing until someone runs `--reconcile`.
+- **Record identity: latest version per `record_id`**
+  - *Choice:* a newer `updated_at` replaces the stored version. 
+    An identical or older version of a stored record is ignored. The same `updated_at` with different contents fails the run.
+  - *Why:* reruns are idempotent and corrections never double-count.
+  - *Trade-off:* we keep only the latest state, not every billing revision.
+- **Voids are kept, not deleted**
+  - *Choice:* void rows stay in `usage` and are excluded by the `non_void_usage` view.
+  - *Why:* Keeping the void row means an older copy of the record, if it arrives again, is recognized as outdated and ignored.
+- **Strict validation (fail closed)**
+  - *Choice:* the run fails on an unknown `status` (anything but `final`/`void`) or on a
+    timestamp not in the exact `YYYY-MM-DDTHH:MM:SSZ` format. In a fixed format like
+    that, string order is time order.
+  - *Trade-off:* one bad record rolls back the whole usage step. The data stays stale
+    until the record is fixed, but a skipped charge or void would silently corrupt totals.
+- **Money:** Amounts are stored as text and added up in Python with Decimal, because SQLite’s SUM() 
+    converts them to floating-point numbers and introduces small rounding errors.
+- **HTTP:** up to 6 attempts with jittered backoff, honoring `Retry-After`. These are
+    starting defaults, not yet tuned against request metrics.
 
-A record that arrives later than the overlap stays missing until someone runs
-`--reconcile`.
+### Commitments workbooks
 
-Records are keyed by `record_id`. A version replaces the stored one only if its
-`updated_at` is newer, so replays and older versions change nothing. If the same
-`updated_at` comes with different contents, the run fails. Voided records are
-kept, and the `non_void_usage` view leaves them out. `updated_at` must match the
-observed `YYYY-MM-DDTHH:MM:SSZ` format exactly, so that comparing the strings
-compares the times. Amounts are stored as exact decimal text.
+- **Layout drift: discover the header row, then explicit aliases**
+  - *Choice:* find the one row that names all five mandatory fields, normalize it, and
+    map it through `ALIASES`.
+  - *Why:* this handles renamed sheets, title rows, reordered columns and both
+    commitment header names.
+  - *Trade-off:* each new header name needs a one-line alias. I rejected fuzzy
+    matching: "Monthly" and "Total Commitment" look alike but are different money.
+- **Mandatory vs descriptive fields**
+  - *Mandatory* (contract ID, customer ID, start date, end date, commitment): the
+    calculations need them, so a missing column or empty cell rejects the file.
+  - *Descriptive* (customer name, status): nice to have, so they may be null. The file
+    still loads and the run summary warns Finance once, when that snapshot loads.
+  - *History rule:* a missing descriptive value doesn't count as an amendment, so a
+    dropped column doesn't create fake versions. Any real change stores the row as
+    received, nulls included. I never copy values from older snapshots.
+  - *Trade-off:* a contract's name or status can be null in the output. The models
+    don't use either, so the numbers are unaffected.
+- **One bad file doesn't block the rest**
+  - *Choice:* each file loads in its own savepoint. A bad file is rolled back, the other
+    files load, and the run exits 1.
+  - *Trade-off:* history is rebuilt after every new file. That takes milliseconds here,
+    but it is wasted work at scale.
+- **Snapshot identity: date + checksum**
+  - *Choice:* a replay is a no-op, changed bytes for a loaded date are rejected, and an
+    older unseen date is accepted.
+  - *Trade-off:* there's no workflow yet to correct an already loaded snapshot.
+- **History: SCD Type 2, rebuilt from observations**
+  - *Choice:* replay every snapshot in date order, and expose `contracts_current`.
+  - *Why:* late or out-of-order files just work, and the result is deterministic.
+  - *Caveats:* `observed_from` is when we saw a change, not when it took effect. A
+    contract missing from a later snapshot keeps its last known version.
 
-For HTTP, the client retries connection errors, 429 and 5xx up to 6 times with
-jittered backoff, and honors `Retry-After`. It refreshes the token before it
-expires, and once more after a 401.
+### Models
 
-## Commitments ingestion
+- **Full rebuild of both tables in one transaction:** cheap at this size, and the
+  tables can't drift from their inputs.
+- **Latest known terms** (`contracts_current`). This isn't an "as known at the time" report.
+- **Dates decide activity, not the status label**
+  - *Why:* an early end needs a real end date, and guessing one would misattribute spend.
+  - *Trade-off:* a contract marked Expired with a future end date is still tracked.
+    The loader warns Finance (exit 0) instead of failing.
+- **Zero-spend days are included.** Spend with no active contract goes to
+  `unattributed_usage_daily`.
+- **`utilization_pct` is a ratio** (1.0 = on track). `at_risk` is computed before
+  rounding, so rounding can't flip a decision at the 0.9 boundary.
 
-Every workbook is parsed and validated before the database is touched. The header
-row is found by looking in every sheet for a single row that names all seven
-fields. Each field name goes through an explicit alias table, so the parser copes
-with renamed sheets, title rows above the table, reordered columns and the two
-commitment header names. The parser also handles these:
+### Runs, transactions and concurrency
 
-- IDs with stray spaces are trimmed.
-- Dates can be Excel dates, `YYYY-MM-DD` or `1 Jun 2026`.
-- Amounts like `$900,000.00` are parsed.
-- Blank rows, the TOTAL row and `*` footnotes are skipped.
-- Exact duplicate rows collapse into one.
+- **Choice:** each step is one `BEGIN IMMEDIATE` transaction in SQLite (WAL,
+  `synchronous=FULL`). `pipeline.py` runs all three steps even if one fails, then exits
+  non-zero.
+- **Gains:**
+  - A killed pod loses only its uncommitted work.
+  - Concurrent runs queue instead of interleaving.
+  - Readers see the last commit.
+  - A bad workbook doesn't block fresh usage.
+- **Costs:**
+  - The pipeline isn't atomic across sources. The three steps commit separately,
+    so the models may combine new usage with last month’s contract terms when a workbook is rejected.
+  - The write lock is held during HTTP calls.
+  - An interrupted scan starts over.
 
-Anything else makes the loader skip that file. That includes a missing or ambiguous
-header, a bad value, conflicting duplicates, an end date before the start date,
-overlapping contracts for one customer, and changed bytes for a date that was
-already loaded. I chose to reject the file instead of guessing: a misread amount
-column would silently corrupt every utilization number. Each file loads inside its
-own savepoint, so a file that fails a check against stored data is undone on its
-own. The other files still load, and the run exits 1 with the errors, so the job
-keeps failing until someone fixes the file.
 
-Trade-off: the checks that need stored data run by writing first. The changed-bytes
-check and the overlap check both work this way, and a rejected file is undone with
-`ROLLBACK TO` the savepoint. That rollback only happens on rejection, and it is cheap
-because nothing has been committed, so readers never see the rejected rows. The
-bigger cost is on the happy path. History is deleted and replayed after every new
-file, so a first run with three files rebuilds it three times. At a few dozen rows
-this takes milliseconds, so I kept the simpler code.
+### Left out on purpose
 
-A skipped file is never stored. Once Finance sends a fixed file under the same date,
-or a new alias is added, the next normal run loads it. History is rebuilt in date
-order, so no separate backfill step is needed. The side effect is that a late middle
-snapshot can move later versions' `observed_from` dates. For example, if August were
-skipped, K-1009's amendment would first show as observed on Sep 28, then move to
-Aug 31 once August loads.
+- **PostgreSQL server instead of a SQLite file:** SQLite needs no deployment and its
+  transactions already cover crashes and concurrent runs. But the file lives on one
+  node's disk, so on a multi-node spot cluster I'd move to Postgres and use an advisory
+  lock in place of `BEGIN IMMEDIATE`.
+- **Durable staging and checkpoints:** would let an interrupted run resume instead of
+  fetching everything again.
+- Scheduled reconciliation, and `--start-date/--end-date` for targeted rescans
+- A snapshot correction workflow
+- Storing extra workbook columns (owner, region, notes)
+- Alerting
+- Checking the workbook TOTAL row (it is skipped today)
+- **Archive and quarantine:** keep every received workbook, including rejected ones,
+  with its rejection reason, so a held file can be reviewed and reprocessed. Today a
+  rejected file is only reported, and the source file is the evidence.
 
-New snapshots are stored as observations. History is then rebuilt from all
-observations in date order, so files can arrive in any order. A contract that
-Finance removes from a later snapshot keeps its last version open in
-`contracts_current`. `observed_from` is the date of the snapshot where a version
-first appears, not the date the amendment took effect.
+## 2. Production (real cluster, spot nodes, Airflow)
 
-## Models
+- **Changes to Part 3**
+  - SQLite on a `ReadWriteOnce` PVC → Postgres, either managed or on on-demand nodes.
+    A spot node takes its local disk with it.
+  - `BEGIN IMMEDIATE` → a Postgres advisory lock.
+  - Workbooks from a ConfigMap → object storage, with every received file archived.
+  - Secrets from a secret manager. Images tagged by git SHA.
+  - Keep `podFailurePolicy` for preemptions, the restricted security context and the
+    resource limits.
+- **Scheduling**
+  - An Airflow DAG: `ingest_usage` ∥ `ingest_commitments` → quality checks →
+    `build_models` → publish.
+  - Each task runs as a `KubernetesPodOperator` on spot nodes, with retries, a
+    timeout and `max_active_runs=1`.
+  - Fetched windows are committed to a staging table, so a preempted run resumes
+    instead of refetching. Publishing is an atomic swap.
+- **Backfills and reprocessing**
+  - A manual DAG takes a date range. It is tracked separately from the full-scan marker.
+  - A monthly full reconcile as cheap insurance against the 30-day assumption.
+  - The models are full rebuilds, so re-running them is the reprocess.
+- **Alerting**
+  - Page on-call for failed or missing runs and stale data (latest `usage_date` or
+    snapshot older than expected).
+  - Send Finance's channel the rejected files, status contradictions and unknown labels.
+  - Track HTTP retries and latency.
+- **CI/CD**
+  - Lint and unit tests on every PR.
+  - An integration run on kind against the mock API: the grader's sequence, then a
+    diff of the exports.
+  - Build once, then promote the same SHA-tagged image through staging.
 
-`build_models.py` rebuilds both tables in full on every run, from
-`contracts_current` (the latest known terms) and `non_void_usage`. A full rebuild
-is cheap at this size, and it means a rerun can't drift from its inputs.
+## 3. When Finance changes the layout again
 
-- Whether a contract is active on a day depends only on its dates. Finance's
-  `status` column is a label and isn't used. So a contract marked Expired or
-  Cancelled whose end date is still in the future keeps being tracked, gets its
-  customer's spend, and can be flagged `at_risk`. The supplied data has no such
-  case. I don't let the label override the dates. An early end needs an actual
-  end date, and guessing one would misattribute spend. I also don't fail the run,
-  because one bad label shouldn't block every contract. Instead:
-  - The commitments loader warns without blocking. It checks each contract's
-    latest version against the last snapshot it appeared in, and flags a status
-    that says the contract is over (Expired, Cancelled, Terminated) while the end
-    date is after that snapshot. It also flags any status not in
-    `KNOWN_STATUSES`, so a new label gets noticed. The warnings go in the run
-    summary under `warnings` and on stderr, and the exit code stays 0.
-  - The warnings repeat on every run until the tracker is fixed. In production
-    they would alert Finance.
-  - Finance fixes the source. They either correct the end date, which the SCD
-    history then records as an amendment and the next rebuild moves later spend
-    to unattributed, or they correct the label.
-- Every day of the term gets a row, including days with no spend
-  (`consumed_usd = 0`).
-- "Last usage date loaded" is the latest `usage_date` in `usage`, counting voided
-  records, because it marks how far the load has reached.
-- Spend is summed with `Decimal` from the stored decimal text. Source amounts and
-  their sums are exact. Expected and projected spend are rounded to cents.
-- `utilization_pct` is the ratio from the spec (1.0 means on track), rounded to
-  6 decimal places. It is not multiplied by 100. `at_risk` is computed from the
-  unrounded values.
+- **Already handled:** renamed sheets, moved or extra columns, title rows, known header
+  variants.
+- **Loads with a warning:** a dropped or renamed descriptive column (customer name,
+  status). Those values are stored as null.
+- **Fails safely:** an unknown mandatory header, a field matched twice, or a new date
+  format rejects *that file only*, with an error that names the file and the header.
+  - Usage and the other files still publish.
+  - The last good contract terms stay in use.
+- **How we find out:** the run exits 1, so the Job or Airflow task fails and alerts.
+- **Fix:** confirm the meaning with Finance, add an alias and a test, and rerun. History
+  rebuilds in order, so no separate backfill is needed.
+- **New status label:** a warning, not a failure.
+- **Nice to have:** suggest the closest alias in the error, but never apply it
+  automatically.
 
-## Concurrency and recovery
+## 4. Data-quality checks
 
-The loaders and the model build use SQLite in WAL mode. Each run is a single `BEGIN IMMEDIATE`
-transaction:
+**Rule:** block when publishing would show wrong money. Warn when the data is
+plausible but needs a human, or when blocking would hide good data from everyone.
 
-- A killed run rolls back.
-- Concurrent runs queue for the write lock instead of interleaving.
-- Readers keep seeing the last committed state.
-
-The cost is that the write lock is held while waiting on HTTP, and an interrupted
-run starts its scan from the beginning. At this data size that's fine.
-
-## Part 3: Kubernetes
-
-The CronJob runs `pipeline.py`, which runs usage ingestion, commitments ingestion
-and the model build in order, each in its own transaction. It runs every step even
-if an earlier one failed, so a rejected workbook doesn't stop fresh usage from
-reaching the models. It exits with the worst exit code, so the Job is marked failed
-and retried. A run killed between steps leaves committed, consistent tables, and the
-next run catches up.
-
-**Storage.** The SQLite file lives on a PersistentVolumeClaim (kind's default
-`standard` class, a folder on the node). I kept SQLite instead of running Postgres
-because its transactions already give what the preemption and concurrency rules
-need, with no rewrite:
-
-- A pod killed at any moment loses only its uncommitted transaction. The WAL rolls
-  back when the file is next opened. Verified by deleting the pod during the first
-  backfill: the Job's next pod started a clean full scan and committed everything.
-- Two runs at the same time queue on `BEGIN IMMEDIATE`. The lock wait
-  (`DB_LOCK_TIMEOUT_SECONDS`, 900 s in the cluster) is longer than a run, because the
-  usage step holds the lock while it calls the API. If a run still times out, it exits
-  1 and the Job retries it. Verified: two simultaneous runs give the same export,
-  byte for byte, as a single run.
-- `concurrencyPolicy: Forbid` only stops the scheduler from overlapping runs. Runs
-  started by hand bypass it, so the lock is the real guarantee.
-
-Trade-off: the volume is `ReadWriteOnce` on one node. On a real multi-node cluster of
-preemptible nodes, the disk would go away with its node, and pods on other nodes
-couldn't share it. There I'd move to Postgres or a managed database on stable nodes,
-replace `BEGIN IMMEDIATE` with an advisory lock, and keep the same one-transaction-per-step design.
-
-**Job settings.**
-- `restartPolicy: Never` and `backoffLimit: 6`: each retry is a fresh pod, and failed
-  pods' logs are kept.
-- `podFailurePolicy` ignores `DisruptionTarget`, so a preempted or evicted pod
-  doesn't use up a retry. The replacement starts only after the old pod has stopped.
-- `activeDeadlineSeconds: 3600` stops a hung run.
-- `startingDeadlineSeconds` and history limits are set too.
-
-**Configuration and credentials** never go in the image.
-- The image has code and libraries only (see `.dockerignore`).
-- Settings come from the ConfigMap `orbital-pipeline-config`.
-- Credentials come from the Secret `billing-api-credentials`, created by
-  `run.py up` from your environment, falling back to the assignment's demo values.
-  That fallback means the demo secret is in `run.py`. It's public in the assignment
-  anyway, and in production it would come from a secret manager.
-- The Finance workbooks are data, not code, so they go in the ConfigMap
-  `orbital-commitments` and not in the image. A new month-end file needs no
-  rebuild. ConfigMaps are limited to 1 MiB, which is plenty for a few
-  spreadsheets. A real feed would come from object storage.
-
-**Export.** `run.py export` starts a helper pod from the pipeline image with the
-volume mounted, runs `build_models.py --print TABLE` in it with `kubectl exec`, and
-writes stdout to the CSV byte for byte. It only reads the last committed tables and
-never rebuilds them. I used stdout instead of `kubectl cp` because `cp` needs `tar`
-in the container and handles Windows paths differently.
-
-**Hardening.** The pipeline pod runs as a non-root user with a read-only root
-filesystem, no capabilities and no privilege escalation, plus resource requests and
-a memory limit. Every `kubectl` call in `run.py` names the `kind-orbital` context, so
-it can't touch another cluster.
-
-**Verified end to end** with the grader's sequence:
-1. Backfill with the pod deleted partway through.
-2. `AS_OF=2026-09-28`, then an incremental run.
-3. A repeat run.
-4. Two runs at once.
-5. `down`, `up`, then one full run.
-
-The exports from steps 2–5 are byte-identical.
-
-## Left out on purpose
-
-- Images are tagged `1.0` and reloaded on every `up`, not tagged by content. A
-  running pod keeps its old image until its run ends.
-- No alerting on failed Jobs. In production a failed or missing run would page.
-- Workbooks and rejection reasons are not stored in the database. Errors go to the
-  run's output, and the source files remain the evidence.
-- Replacing a snapshot that was already loaded isn't supported. A changed file for
-  a stored date is rejected.
-- Extra workbook columns (owner, region, notes) aren't stored.
-- No PostgreSQL, durable staging or checkpoints. SQLite is enough for one writer.
-
-## Next steps
-
-- Validate commitment snapshots in memory, then write once. Read the stored
-  observations, add each new file in memory, and rebuild history with a pure function
-  that returns rows instead of writing them. Drop any file that fails a check, then
-  write the accepted snapshots and replace `contract_history` once per run. That
-  removes the savepoints, the write-then-undo, and the repeated rebuilds. It also
-  makes the history logic testable without a database. At much larger sizes, update
-  history incrementally in SQL instead of keeping observations in memory.
-
-## Production
-
-- **Scheduling:** run the jobs from Airflow (or a similar orchestrator) every day,
-  with retries after a delay. Make backfills and full reconciliations explicit,
-  parameterized jobs.
-- **Storage and secrets:** use a managed database and a secret store. On spot
-  nodes, stage data durably and publish it atomically, so an interrupted run
-  doesn't have to fetch everything again.
-- **Alerting:** alert on failed or missing runs, stale data, and a Finance export
-  that didn't arrive.
-- **CI:** run the tests and the smoke check before every deploy.
-- **Layout changes:** when Finance changes the workbook layout, the run fails and
-  names the file and the missing header. Someone confirms the meaning with Finance,
-  adds an alias and a test, and the next run loads the file.
+| Check | Built | Blocks publishing? |
+|---|---|---|
+| Usage schema, types, `status` in `final`/`void`, exact timestamp format | Yes | Yes |
+| Same `record_id` + `updated_at` with different contents | Yes | Yes |
+| Workbook: mandatory headers and values, parseable dates and amounts, end ≥ start | Yes | Yes, that file |
+| Workbook: missing or empty customer name or status | Yes | No, warn Finance |
+| Conflicting duplicate rows, overlapping contracts for one customer | Yes | Yes, that file |
+| Changed bytes for an already loaded snapshot date | Yes | Yes, that file |
+| Status label contradicts dates, unknown label | Yes | No, warn Finance |
+| One row per contract-day; attributed + unattributed = non-void usage total | No | Yes |
+| Workbook TOTAL row ≠ sum of commitments | No | No, warn Finance |
+| Freshness: usage or snapshot older than expected | No | No, alert |
+| Day-over-day spend or row-count anomaly, rising unattributed share | No | No, alert |
 
 ## AI usage
 
-I used AI assistants to write and later simplify the loaders, the tests and this
-documentation. I verified the results with the unit tests and with live runs
-against the unchanged mock API.
+I used AI assistants to lay out alternatives, to write and then simplify the loaders,
+tests and docs, and to run the measurements above. I checked the results with the unit
+tests and with live runs against the unchanged mock API.
